@@ -1,0 +1,44 @@
+services:
+  - type: web
+    name: tiago-ia-backend
+    runtime: python
+    region: sao-paulo
+    plan: starter
+    buildCommand: "cd backend && pip install --no-cache-dir -r requirements.txt"
+    startCommand: "cd backend && uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1"
+    rootDir: ./
+    healthCheckPath: "/docs"
+    autoDeploy: yes
+    envVars:
+      - key: PORT
+        value: "10000"
+      - key: HOST
+        value: "0.0.0.0"
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: RAPIDAPI_KEY
+        sync: false
+      - key: RAPIDAPI_HOST_FLASHLIVE
+        value: "flashlive-sports.p.rapidapi.com"
+      - key: RAPIDAPI_HOST_FREEAPI
+        value: "free-api-live-football-data.p.rapidapi.com"
+      - key: RAPIDAPI_HOST_LEGACY
+        value: "api-football-v1.p.rapidapi.com"
+      - key: RAPIDAPI_HOST
+        value: "flashlive-sports.p.rapidapi.com"
+      - key: FOOTBALL_API_KEY
+        sync: false
+      - key: RAPIDAPI_HOST_SPORTS_NEWS
+        value: "sports-information.p.rapidapi.com"
+      - key: RAPIDAPI_HOST_CRICBUZZ
+        value: "cricbuzz-cricket.p.rapidapi.com"
+      - key: RAPIDAPI_HOST_TODAY_FOOTBALL_PREDICT
+        value: "today-football-prediction.p.rapidapi.com"
+      - key: RAPIDAPI_HOST_SOFASPORT
+        value: "sofasport.p.rapidapi.com"
+      - key: RAPIDAPI_HOST_BET365_INPLAY
+        value: "bet365-api-inplay.p.rapidapi.com"
+      - key: RAPIDAPI_HOST_1XBET
+        value: "1xbet-api.p.rapidapi.com"
+      - key: RAPIDAPI_HOST_FOOTBALL_PRO
+        value: "football-pro.p.rapidapi.com"
