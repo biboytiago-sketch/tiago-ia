@@ -20,6 +20,51 @@ def _carregar_dotenv_manual(caminho_abs: str, override: bool = False):
                 continue
             os.environ[chave] = valor
 
+# --------------------- RENDER SECRET FILES FALLBACK ---------------------
+# Render monta "Secret Files" em /etc/secrets/<FILENAME> (ex: /etc/secrets/GEMINI_API_KEY)
+# Se a ENV VAR estiver vazia, tentamos ler o conteúdo do arquivo com mesmo nome.
+# Isso garante funcionamento tanto em Environment Variables (modo normal) quanto
+# em Secret Files (modo arquivo que o usuário ativou no dashboard).
+_VARIAVEIS_OBRIGATORIAS = [
+    "GEMINI_API_KEY",
+    "RAPIDAPI_KEY",
+    "FOOTBALL_API_KEY",
+    "API_FOOTBALL_KEY",
+    "FOOTBALL_DATA_ORG_KEY",
+    "RAPIDAPI_HOST",
+    "RAPIDAPI_HOST_FLASHLIVE",
+    "RAPIDAPI_HOST_FREEAPI",
+    "RAPIDAPI_HOST_LEGACY",
+    "RAPIDAPI_HOST_SPORTS_NEWS",
+    "RAPIDAPI_HOST_CRICBUZZ",
+    "RAPIDAPI_HOST_TODAY_FOOTBALL_PREDICT",
+    "RAPIDAPI_HOST_SOFASPORT",
+    "RAPIDAPI_HOST_BET365_INPLAY",
+    "RAPIDAPI_HOST_1XBET",
+    "RAPIDAPI_HOST_FOOTBALL_PRO",
+    "PORT",
+    "HOST",
+]
+
+def _carregar_render_secret_files():
+    for chave in _VARIAVEIS_OBRIGATORIAS:
+        valor_atual = os.getenv(chave, "").strip()
+        if valor_atual:
+            continue
+        caminho_arquivo = f"/etc/secrets/{chave}"
+        try:
+            if os.path.exists(caminho_arquivo):
+                with open(caminho_arquivo, "r", encoding="utf-8") as f:
+                    conteudo = f.read().strip()
+                    if conteudo:
+                        os.environ[chave] = conteudo
+        except Exception:
+            pass
+
+# 1º tenta Secret Files do Render (se existir /etc/secrets/*)
+_carregar_render_secret_files()
+
+# 2º tenta .env local (Windows / desenvolvedor)
 _DOTENV_CANDIDATOS = [
     os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".env"),
