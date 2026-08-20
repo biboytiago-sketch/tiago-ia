@@ -42,3 +42,7 @@ services:
         value: "1xbet-api.p.rapidapi.com"
       - key: RAPIDAPI_HOST_FOOTBALL_PRO
         value: "football-pro.p.rapidapi.com"
+      - key: FOOTBALL_DATA_ORG_KEY
+        sync: false
+      - key: API_FOOTBALL_KEY
+        sync: false

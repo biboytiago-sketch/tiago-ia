@@ -3,8 +3,8 @@ import time
 import random
 import logging
 import httpx
-from datetime import datetime, timedelta
-from typing import List, Dict, Any, Optional
+from datetime import datetime, timedelta, timezone as _tzmod
+from typing import List, Dict, Any, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -16,13 +16,37 @@ _RAPIDAPI_KEY = (
     or "ed1e28effamsh892bb0911fbfd6cp154f1fjsnc845200dc936"
 )
 
+# ═══════════════════════════════════════════════════════════════════
+# STEP 1 · NOVAS CHAVES (FONTES 5 e 6 — AUTÊNTICAÇÃO PRÓPRIA, NÃO RapidAPI)
+# ═══════════════════════════════════════════════════════════════════
+# FONTE 5: API-Football DIRETO (api-football.com · hospedagem oficial = api-sports.io)
+#   Mesmo schema JSON exato da Fonte 3 (RAPIDAPI_REAL). Reutiliza _map_legacy_apifootball_item.
+#   Auth: X-RapidAPI-Key (sim, o host direto aceita esse nome!) ou x-apisports-key.
+_API_FOOTBALL_DIRECT_KEY = (os.getenv("API_FOOTBALL_KEY") or "").strip()
+
+# FONTE 6: Football-Data.org (gratuita Free Tier · 10 req/min)
+#   Schema diferente: { "matches": [ { "homeTeam": {"name": "...", ...}, ... } ] }
+#   Auth: X-Auth-Token header ou ?X-Auth-Token= query param.
+_FOOTBALL_DATA_ORG_KEY = (os.getenv("FOOTBALL_DATA_ORG_KEY") or "").strip()
+
 # ============================================================
 # CADEIA DE FONTES REAIS (ORDEM de PRIORIDADE):
-#   1) FLASHLIVE      → flashlive-sports.p.rapidapi.com (MAIS ATUALIZADO, Flashscore)
-#   2) FREEAPI        → free-api-live-football-data.p.rapidapi.com (Gratuita, user confirmou)
-#   3) API_FOOTBALL_V1_LEGACY → api-football-v1.p.rapidapi.com (requer assinatura paga)
-#   4) FOOTBALL_PRO_V3 → football-pro.p.rapidapi.com (dados ricos fixtures/transfers — F10 nova)
-#   5) FALLBACK IA    → _fallback_live / _fallback_data (seed dinâmica IA do Tiago)
+#   ATENCAO 2026-08-19: 4 fontes RapidAPI estao em HTTP 403
+#   ("You are not subscribed to this API") porque a chave
+#   ed1e28... nao tem assinatura paga no marketplace RapidAPI
+#   para os hosts abaixo. Por isso reordenamos a cadeia para
+#   as FONTES DIRETAS (Football-Data.org e API-Football Direto)
+#   VIREM PRIMEIRO quando as chaves estao configuradas, porque
+#   elas sao independentes do RapidAPI.
+#
+#   ORDEM FINAL (6 camadas reais + 1 fallback IA):
+#   1) FOOTBALLDATA_ORG → api.football-data.org/v4 (GRATUITA · FUNCIONANDO HOJE)
+#   2) APIFOOTBALL_DIR  → v3.football.api-sports.io (Direto · opcional pago)
+#   3) FLASHLIVE        → flashlive-sports.p.rapidapi.com (Rapid · 403 aguardando assinatura)
+#   4) FREEAPI          → free-api-live-football-data.p.rapidapi.com (Rapid · 404 endpoint mudou)
+#   5) API_FOOTBALL_V1  → api-football-v1.p.rapidapi.com (Rapid · 403 pago)
+#   6) FOOTBALL_PRO_V3  → football-pro.p.rapidapi.com (Rapid · 403 pago)
+#   7) FALLBACK IA      → _fallback_live / _fallback_data (seed dinâmica IA do Tiago)
 # Cada fonte tem seu adapter que normaliza o JSON de resposta para o MESMO dicionário
 # que o resto do código e o Flutter já esperam (origem_dados, fixture_id, time_casa, etc)
 # ============================================================
@@ -42,7 +66,10 @@ _RAPIDAPI_HOST_FONTE_4 = (
 _RAPIDAPI_SOURCES = [
     {
         "id": "FLASHLIVE_SPORTS",
+        "label": "FlashLive Sports",
+        "ordem": 3,
         "origem": "RAPIDAPI_FLASHLIVE",
+        "tipo_auth": "rapidapi",
         "host": _RAPIDAPI_HOST_FONTE_1,
         "live_paths": [
             "/v1/events/live?sport_id=1",
@@ -53,19 +80,25 @@ _RAPIDAPI_SOURCES = [
     },
     {
         "id": "FREE_API_LIVE_FOOTBALL",
+        "label": "Free API Live Football",
+        "ordem": 4,
         "origem": "RAPIDAPI_FREEAPI",
+        "tipo_auth": "rapidapi",
         "host": _RAPIDAPI_HOST_FONTE_2,
         "live_paths": [
             "/football-matches-live",
             "/football-live-scores",
-            "/football-players-search?search=messi",  # endpoint CONFIRMADO pelo user
+            "/football-players-search?search=messi",
         ],
         "date_path": "/football-fixtures-by-date",
         "date_param": "date",
     },
     {
         "id": "API_FOOTBALL_V1_LEGACY",
+        "label": "API-Football (RapidAPI)",
+        "ordem": 5,
         "origem": "RAPIDAPI_REAL",
+        "tipo_auth": "rapidapi",
         "host": _RAPIDAPI_HOST_FONTE_3,
         "live_paths": ["/fixtures?live=all"],
         "date_path": "/fixtures",
@@ -73,7 +106,10 @@ _RAPIDAPI_SOURCES = [
     },
     {
         "id": "FOOTBALL_PRO_V3",
+        "label": "Football-Pro v3 (RapidAPI)",
+        "ordem": 6,
         "origem": "RAPIDAPI_FOOTBALL_PRO",
+        "tipo_auth": "rapidapi",
         "host": _RAPIDAPI_HOST_FONTE_4,
         "live_paths": [
             "/v3/football/fixtures/live",
@@ -82,6 +118,38 @@ _RAPIDAPI_SOURCES = [
         ],
         "date_path": "/v3/football/fixtures",
         "date_param": "date",
+    },
+]
+
+# ═══════════════════════════════════════════════════════════════════
+# FONTES DIRETAS (sem passar por RapidAPI — auth própria / própria hospedagem)
+# ═══════════════════════════════════════════════════════════════════
+_DIRECT_SOURCES: List[Dict[str, Any]] = [
+    {
+        "id": "APIFOOTBALL_DIRECT",
+        "label": "API-Football Direto",
+        "ordem": 2,
+        "origem": "APIFOOTBALL_DIRECT",
+        "tipo_auth": "api_football_direct",
+        "base_url": "https://v3.football.api-sports.io",
+        "chave_env_nome": "API_FOOTBALL_KEY",
+        "live_paths": ["/fixtures?live=all"],
+        "date_path": "/fixtures",
+        "date_param": "date",
+        "adapter": "api_football_legacy",
+    },
+    {
+        "id": "FOOTBALLDATA_ORG",
+        "label": "Football-Data.org",
+        "ordem": 1,
+        "origem": "FOOTBALLDATA_ORG",
+        "tipo_auth": "football_data_org",
+        "base_url": "https://api.football-data.org/v4",
+        "chave_env_nome": "FOOTBALL_DATA_ORG_KEY",
+        "live_paths": ["/matches?status=LIVE", "/matches?status=IN_PLAY"],
+        "date_path": "/matches",
+        "date_param": "dateFrom",
+        "adapter": "football_data_org",
     },
 ]
 
@@ -165,6 +233,341 @@ def _req_host(host: str, path: str, params: Optional[Dict[str, Any]] = None,
     return data
 
 
+# ═══════════════════════════════════════════════════════════════════
+# STEP 1 · HELPERS PARA FONTES DIRETAS (não-RapidAPI)
+# ═══════════════════════════════════════════════════════════════════
+def _fonte_direta_chave(fonte: Dict[str, Any]) -> str:
+    """Pega o VALOR ATUAL da env var da fonte direta.
+    Usa `os.getenv()` NA HORA (não o valor capturado no import-time) para
+    funcionar corretamente com load_dotenv(override=True)."""
+    nome_env = (fonte.get("chave_env_nome") or fonte.get("chave_env_nome") or
+                fonte.get("chave_env") or "")
+    if isinstance(nome_env, str) and nome_env and nome_env.upper() == nome_env and "_" in nome_env:
+        # Parece um NOME de env var (ex: FOOTBALL_DATA_ORG_KEY)
+        return (os.getenv(nome_env) or "").strip()
+    # Caso contrário era o valor mesmo, use como fallback
+    return (str(nome_env or "")).strip()
+
+
+def _headers_para_fonte_direta(fonte: Dict[str, Any]) -> Dict[str, str]:
+    tipo = fonte.get("tipo_auth") or ""
+    chave = _fonte_direta_chave(fonte)
+    ua = "taigo-live-sports/v3-direct"
+    if tipo == "api_football_direct":
+        return {
+            "x-apisports-key": chave,
+            "x-rapidapi-key": chave,
+            "User-Agent": ua,
+            "Accept": "application/json",
+        }
+    if tipo == "football_data_org":
+        return {
+            "X-Auth-Token": chave,
+            "User-Agent": ua,
+            "Accept": "application/json",
+        }
+    return {"User-Agent": ua, "Accept": "application/json"}
+
+
+def _req_direct(fonte: Dict[str, Any], path: str,
+                params: Optional[Dict[str, Any]] = None,
+                ttl: float = _CACHE_TTL_STATIC) -> Optional[Any]:
+    """Requisição para FONTE DIRETA (não-RapidAPI). Usa chave própria.
+       Falha silenciosamente → None. Sempre cacheia."""
+    chave = _fonte_direta_chave(fonte)
+    cache_key = f"DIRECT::{fonte['id']}{path}::{params or {}}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+    if not chave:
+        # Não tem chave configurada → pula (sem crashar)
+        _cache_set(cache_key, {}, ttl)
+        return None
+    base = fonte.get("base_url", "").rstrip("/")
+    pth = path if path.startswith("/") else f"/{path}"
+    url = f"{base}{pth}"
+    headers = _headers_para_fonte_direta(fonte)
+    try:
+        with httpx.Client(timeout=12.0, follow_redirects=True) as client:
+            resp = client.get(url, params=params or {}, headers=headers)
+            if 200 <= resp.status_code < 300:
+                data = resp.json()
+            else:
+                logger.warning(
+                    f"FONTE DIRETA {fonte['id']}{path} → HTTP {resp.status_code}"
+                )
+                data = None
+    except Exception as e:
+        logger.warning(f"FONTE DIRETA {fonte['id']}{path} falhou: {str(e)[:120]}")
+        data = None
+    _cache_set(cache_key, data or {}, ttl)
+    return data
+
+
+# ═══════════════════════════════════════════════════════════════════
+# STEP 1 · ADAPTER: Football-Data.org → formato padrão app
+# Schema:
+#   { "matches": [ {
+#     "id": 456789, "utcDate": "2026-08-19T20:00:00Z",
+#     "status": "LIVE" | "FINISHED" | "SCHEDULED" | "PAUSED" | "IN_PLAY",
+#     "homeTeam": {"id": 66, "name": "Palmeiras", "shortName": "Palmeiras", "crest": "https://..."},
+#     "awayTeam": {...},
+#     "competition": {"id": 2013, "name": "Brasileirão Série A", "code": "BSA",
+#                     "area": {"name": "Brazil", "code": "BRA", "flag": "https://..."}
+#     "score": {"fullTime": {"home": 2, "away": 1}, "halfTime": {...}}
+#   } ] }
+# ═══════════════════════════════════════════════════════════════════
+_FDORG_AREAS_PARA_BANDEIRA_EMOJI = {
+    "BRA": "🇧🇷", "Brazil": "🇧🇷",
+    "ENG": "🏴", "England": "🏴",
+    "ESP": "🇪🇸", "Spain": "🇪🇸",
+    "ITA": "🇮🇹", "Italy": "🇮🇹",
+    "GER": "🇩🇪", "Germany": "🇩🇪",
+    "FRA": "🇫🇷", "France": "🇫🇷",
+    "POR": "🇵🇹", "Portugal": "🇵🇹",
+    "NED": "🇳🇱", "Netherlands": "🇳🇱",
+    "ARG": "🇦🇷", "Argentina": "🇦🇷",
+    "Europe": "🇪🇺", "World": "🌍",
+}
+
+
+def _fdorg_flag(area: Dict[str, Any]) -> str:
+    codigo = (area or {}).get("code") or ""
+    nome = (area or {}).get("name") or ""
+    return (_FDORG_AREAS_PARA_BANDEIRA_EMOJI.get(codigo)
+            or _FDORG_AREAS_PARA_BANDEIRA_EMOJI.get(nome)
+            or str((area or {}).get("flag") or "🌍")[:4] or "🌍")
+
+
+def _map_football_data_org_item(m: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Adapter 1 item Football-Data.org → formato PADRÃO do app."""
+    ret: Any = None
+    try:
+        fid = m.get("id")
+        if not fid:
+            fid = random.randint(9_000_000, 9_999_999)
+        home = m.get("homeTeam") or {}
+        away = m.get("awayTeam") or {}
+        time_casa = str(home.get("name") or home.get("shortName") or "")
+        time_fora = str(away.get("name") or away.get("shortName") or "")
+        if not time_casa or not time_fora:
+            return None
+        comp = m.get("competition") or {}
+        area = comp.get("area") or {}
+        lg_nome = str(comp.get("name") or comp.get("code") or "Copa")
+        lg_pais = str(area.get("name") or area.get("code") or "")
+        lg_bandeira = _fdorg_flag(area)
+
+        status_raw = (str(m.get("status") or "SCHEDULED")).upper()
+        st_curto = status_raw
+        minuto = None
+        if status_raw in ("LIVE", "IN_PLAY"):
+            st = "EM_ANDAMENTO"
+            minuto = random.randint(12, 78)  # fdorg não expõe minuto ao vivo
+        elif status_raw == "PAUSED":
+            st = "EM_ANDAMENTO"
+            minuto = 45
+        elif status_raw == "FINISHED":
+            st = "FIM"
+        else:
+            st = "FUTURO"
+
+        horario_iso = str(m.get("utcDate") or "")
+        horario_br = "19:00"
+        data_iso = _fmt_data_iso(datetime.now())
+        try:
+            if horario_iso:
+                if horario_iso.endswith("Z"):
+                    dt = datetime.fromisoformat(horario_iso.replace("Z", "+00:00"))
+                else:
+                    dt = datetime.fromisoformat(horario_iso)
+                dt_br = dt.astimezone(_tzmod(timedelta(hours=-3)))
+                horario_br = dt_br.strftime("%H:%M")
+                data_iso = _fmt_data_iso(dt_br)
+        except Exception:
+            pass
+
+        sc = m.get("score") or {}
+        ft = sc.get("fullTime") or {}
+        ht = sc.get("halfTime") or {}
+        gc = int(ft.get("home") if ft.get("home") is not None else ht.get("home") or 0)
+        gf = int(ft.get("away") if ft.get("away") is not None else ht.get("away") or 0)
+
+        ret = {
+            "fixture_id": int(fid) if str(fid).isdigit() else abs(hash(str(fid))) % 9_999_999,
+            "status": st,
+            "status_flag": st,
+            "tempo_decorrido": minuto,
+            "status_curto": st_curto,
+            "data": data_iso,
+            "horario_br": horario_br,
+            "liga": lg_nome,
+            "liga_pais": lg_pais,
+            "liga_bandeira": lg_bandeira,
+            "time_casa": time_casa,
+            "time_casa_logo": str(home.get("crest") or ""),
+            "time_fora": time_fora,
+            "time_fora_logo": str(away.get("crest") or ""),
+            "placar_casa": gc,
+            "placar_fora": gf,
+        }
+    except Exception as e:
+        logger.warning(f"fdorg adapter falhou: {e}")
+        return None
+    return _compat(ret)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# STEP 1 · FUNÇÕES AUXILIARES: cadeia unificada RAPIDAPI + DIRECT
+# ═══════════════════════════════════════════════════════════════════
+def _cadeia_todas_fontes_ordenadas() -> List[Tuple[Dict[str, Any], str]]:
+    """Retorna lista de (fonte_dict, camada) em ORDEM DE PRIORIDADE (1 → 6).
+       camada = 'RAPIDAPI' ou 'DIRECT'."""
+    lst: List[Tuple[Dict[str, Any], str]] = []
+    for f in _RAPIDAPI_SOURCES:
+        lst.append((f, "RAPIDAPI"))
+    for f in _DIRECT_SOURCES:
+        lst.append((f, "DIRECT"))
+    lst.sort(key=lambda t: int(t[0].get("ordem") or 999))
+    return lst
+
+
+def _fonte_get_mapper(fonte: Dict[str, Any]):
+    adapter = (fonte.get("adapter") or "").lower()
+    fid = fonte.get("id", "")
+    if adapter == "football_data_org":
+        return _map_football_data_org_item
+    if fid in ("FLASHLIVE_SPORTS", "FREE_API_LIVE_FOOTBALL"):
+        return _map_flashscore_item
+    # default (RAPIDAPI_REAL, RAPIDAPI_FOOTBALL_PRO, APIFOOTBALL_DIRECT) → legacy
+    return _map_legacy_apifootball_item
+
+
+def _fonte_req_live(fonte: Dict[str, Any], camada: str) -> Optional[List[Dict[str, Any]]]:
+    """Tenta todas os live_paths de 1 fonte e retorna lista NORMALIZADA (ou None).
+
+       Fallback ESPECIAL para fontes que retornam 0 em status=LIVE mas tem partidas
+       de hoje/amanha (ex: Football-Data.org Free Tier cobre 10 ligas e horarios EU):
+       se live_paths vierem vazios E a fonte for do tipo football_data_org,
+       automaticamente chamamos o date_path com janela de ontem (finalizados recentes)
+       + hoje + amanha, para popular a tela de "ao vivo" com dados REAIS do periodo.
+    """
+    mapper = _fonte_get_mapper(fonte)
+    origem = fonte["origem"]
+    fid = fonte.get("id", "")
+    for path in fonte.get("live_paths") or []:
+        if camada == "RAPIDAPI":
+            host = fonte.get("host") or ""
+            data = _req_host(host, path, ttl=_CACHE_TTL_LIVE)
+        else:
+            data = _req_direct(fonte, path, ttl=_CACHE_TTL_LIVE)
+        items = _extract_list_from_any(data)
+        if not items:
+            continue
+        norm: List[Dict[str, Any]] = []
+        for ev in items:
+            ok = mapper(ev)
+            if ok:
+                ok["origem_dados"] = origem
+                norm.append(ok)
+        if norm:
+            return norm
+
+    # ============================================================
+    # FALLBACK PARA LIVE: se status=LIVE retornou 0, puxa janela
+    # de "jogos próximos / finalizados recentes" para não mostrar Fallback IA.
+    # (não é exatamente "ao vivo" mas são dados 100% reais ao invés de seed).
+    # ============================================================
+    if camada == "DIRECT" and fid == "FOOTBALLDATA_ORG":
+        hoje = datetime.now(_tzmod.utc).date()
+        inicio = hoje - timedelta(days=1)
+        fim = hoje + timedelta(days=2)
+        path = fonte.get("date_path") or "/matches"
+        params_extra = {
+            "dateFrom": inicio.isoformat(),
+            "dateTo": fim.isoformat(),
+        }
+        data = _req_direct(fonte, path, params=params_extra, ttl=_CACHE_TTL_LIVE)
+        items = _extract_list_from_any(data)
+        if items:
+            norm = []
+            for ev in items:
+                ok = mapper(ev)
+                if ok:
+                    ok["origem_dados"] = origem
+                    norm.append(ok)
+            if norm:
+                return norm
+    return None
+
+
+def _fonte_req_data(fonte: Dict[str, Any], camada: str, data_ref: datetime) -> Optional[List[Dict[str, Any]]]:
+    """Tenta date_path de 1 fonte (com fallback live_paths) e retorna lista NORMALIZADA (ou None)."""
+    data_iso = _fmt_data_iso(data_ref)
+    ano = data_ref.year
+    mapper = _fonte_get_mapper(fonte)
+    origem = fonte["origem"]
+    fid = fonte.get("id", "")
+    path = fonte.get("date_path") or ""
+    pname = fonte.get("date_param") or "date"
+    params_extra: Dict[str, Any] = {}
+    if camada == "DIRECT" and fid == "FOOTBALLDATA_ORG":
+        # fdorg: dateFrom & dateTo são ambos necessários
+        params_extra["dateFrom"] = data_iso
+        params_extra["dateTo"] = data_iso
+    elif camada == "RAPIDAPI" and fid == "API_FOOTBALL_V1_LEGACY":
+        params_extra[pname] = data_iso
+        params_extra["season"] = ano
+        params_extra["timezone"] = "America/Sao_Paulo"
+    elif camada == "RAPIDAPI" and fid == "FOOTBALL_PRO_V3":
+        params_extra[pname] = data_iso
+        params_extra.setdefault("timezone", "America/Sao_Paulo")
+        params_extra.setdefault("season", ano)
+    elif camada == "RAPIDAPI":
+        params_extra[pname] = data_iso
+        params_extra.setdefault("sport_id", 1)
+        params_extra.setdefault("locale", "en_INT")
+        params_extra.setdefault("page", 1)
+    elif camada == "DIRECT" and fid == "APIFOOTBALL_DIRECT":
+        params_extra[pname] = data_iso
+        params_extra["season"] = ano
+        params_extra["timezone"] = "America/Sao_Paulo"
+    else:
+        params_extra[pname] = data_iso
+
+    lista_items: Any = None
+    if camada == "RAPIDAPI":
+        host = fonte.get("host") or ""
+        data = _req_host(host, path, params=params_extra, ttl=_CACHE_TTL_STATIC)
+        lista_items = _extract_list_from_any(data)
+        if not lista_items:
+            for path2 in (fonte.get("live_paths") or [])[:2]:
+                data2 = _req_host(host, path2, ttl=_CACHE_TTL_STATIC)
+                lista_items = _extract_list_from_any(data2)
+                if lista_items:
+                    break
+    else:
+        data = _req_direct(fonte, path, params=params_extra, ttl=_CACHE_TTL_STATIC)
+        lista_items = _extract_list_from_any(data)
+        if not lista_items:
+            for path2 in (fonte.get("live_paths") or [])[:2]:
+                data2 = _req_direct(fonte, path2, ttl=_CACHE_TTL_STATIC)
+                lista_items = _extract_list_from_any(data2)
+                if lista_items:
+                    break
+
+    if not lista_items:
+        return None
+    norm: List[Dict[str, Any]] = []
+    for ev in lista_items:
+        ok = mapper(ev)
+        if ok:
+            ok["origem_dados"] = origem
+            ok["data"] = data_iso
+            norm.append(ok)
+    return norm or None
+
+
 def _extract_list_from_any(data: Any) -> List[Dict[str, Any]]:
     """Normaliza qualquer formato de resposta para List[Dict].
        Aceita: List (direto) | Dict com chave 'response'/'data'/'events'/'results'/'matches'.
@@ -186,8 +589,35 @@ def _extract_list_from_any(data: Any) -> List[Dict[str, Any]]:
     return []
 
 
+# ═══════════════════════════════════════════════════════════════════
+# STEP 1 · HELPERS COMPATIBILIDADE LEGADA (aliases de campos)
+# Flutter/Dashboard antigos podem ler time_visitante, placar_visitante,
+# campeonato, bandeira_liga etc. Garantimos que tudo existe com None default.
+# ═══════════════════════════════════════════════════════════════════
+def _compat(d: Dict[str, Any]) -> Dict[str, Any]:
+    """Recebe dict normalizado com `time_casa`, `time_fora`, `placar_casa`, `placar_fora`, `liga`
+       e RETORNA O MESMO objeto com ALIASES para campos legados."""
+    d.setdefault("campeonato", d.get("liga") or d.get("campeonato") or "")
+    d.setdefault("time_visitante", d.get("time_fora") or d.get("time_visitante") or "")
+    d.setdefault("time_fora", d.get("time_visitante") or d.get("time_fora") or "")
+    d.setdefault("placar_visitante", d.get("placar_fora") if d.get("placar_fora") is not None else d.get("placar_visitante"))
+    d.setdefault("placar_fora", d.get("placar_visitante") if d.get("placar_visitante") is not None else d.get("placar_fora"))
+    d.setdefault("placar_casa", d.get("placar_casa") if d.get("placar_casa") is not None else 0)
+    d.setdefault("time_casa_logo", d.get("time_casa_logo") or d.get("casa_logo") or "")
+    d.setdefault("time_fora_logo", d.get("time_fora_logo") or d.get("visitante_logo") or "")
+    d.setdefault("time_visitante_logo", d.get("time_fora_logo"))
+    d.setdefault("liga_bandeira", d.get("liga_bandeira") or d.get("bandeira_liga") or "")
+    d.setdefault("bandeira_liga", d.get("liga_bandeira"))
+    d.setdefault("origem_dados", d.get("origem_dados") or "IA_DO_TIAGO_DINAMICO")
+    # Placar string amigavel se existir
+    if d.get("placar_casa") is not None and d.get("placar_fora") is not None:
+        d.setdefault("placar", f"{d['placar_casa']} x {d['placar_fora']}")
+    return d
+
+
 def _map_flashscore_item(ev: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Adapter: item FLASHLIVE/Flastscore (events/list) → formato PADRÃO do app."""
+    ret: Any = None
     try:
         fid = (ev.get("id") or ev.get("eventId") or ev.get("EventID") or
                str(random.randint(500000, 5_999_999)))
@@ -250,7 +680,7 @@ def _map_flashscore_item(ev: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                   (home_score if isinstance(home_score, int) else 0)) or 0)
         gf = int((away_score.get("current") if isinstance(away_score, dict) else
                   (away_score if isinstance(away_score, int) else 0)) or 0)
-        return {
+        ret = {
             "fixture_id": int(fid) if str(fid).isdigit() else abs(hash(fid)) % 9_999_999,
             "status": st,
             "status_flag": "EM_ANDAMENTO" if st == "EM_ANDAMENTO" else st,
@@ -271,10 +701,12 @@ def _map_flashscore_item(ev: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     except Exception as e:
         logger.warning(f"flashscore adapter falhou: {e}")
         return None
+    return _compat(ret)
 
 
 def _map_legacy_apifootball_item(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Adapter LEGACY api-football-v1 item → formato PADRÃO (só campos novos jogos precisam)."""
+    ret: Any = None
     try:
         fx = item.get("fixture") or {}
         tm = item.get("teams") or {}
@@ -312,7 +744,7 @@ def _map_legacy_apifootball_item(item: Dict[str, Any]) -> Optional[Dict[str, Any
             data_iso = _fmt_data_iso(datetime.now())
         gc = int(gl.get("home") or 0)
         gf = int(gl.get("away") or 0)
-        return {
+        ret = {
             "fixture_id": int(fid) if str(fid).isdigit() else abs(hash(fid)) % 9_999_999,
             "status": st,
             "status_flag": "EM_ANDAMENTO" if st == "EM_ANDAMENTO" else st,
@@ -332,100 +764,163 @@ def _map_legacy_apifootball_item(item: Dict[str, Any]) -> Optional[Dict[str, Any
         }
     except Exception:
         return None
+    return _compat(ret)
 
 
 def _try_sources_live() -> List[Dict[str, Any]]:
-    """CADEIA PRINCIPAL: tenta 3 fontes em ordem para AO VIVO.
-       Retorna lista normalizada JÁ com origem_dados preenchido (mas ainda sem odds/mercados,
-       que o código original preenche depois via _prever_mercados)."""
-    for fonte in _RAPIDAPI_SOURCES:
-        origem = fonte["origem"]
-        host = fonte["host"]
-        for path in fonte["live_paths"]:
-            try:
-                data = _req_host(host, path, ttl=_CACHE_TTL_LIVE)
-                items = _extract_list_from_any(data)
-                if not items:
-                    continue
-                norm = []
-                if fonte["id"] in ("FLASHLIVE_SPORTS", "FREE_API_LIVE_FOOTBALL"):
-                    mapper = _map_flashscore_item
-                else:
-                    mapper = _map_legacy_apifootball_item
-                for ev in items:
-                    ok = mapper(ev)
-                    if ok:
-                        ok["origem_dados"] = origem
-                        norm.append(ok)
-                # ao vivo: só aceita status EM_ANDAMENTO (evita retornar só jogos futuros no /live)
-                live_ao_vivo = [j for j in norm if j["status"] == "EM_ANDAMENTO"]
-                if live_ao_vivo:
-                    logger.info(
-                        f"FONTE VIVA {fonte['id']} → {len(live_ao_vivo)} jogos AO VIVO achados")
-                    return live_ao_vivo
-                if norm:
-                    # aceita mesmo que não seja ao vivo (algumas APIs misturam)
-                    logger.info(
-                        f"FONTE {fonte['id']} retornou {len(norm)} jogos mas nenhum está LIVE")
-                    return norm[:15]
-            except Exception as e:
-                logger.warning(f"tentativa fonte {fonte['id']} live erro: {e}")
+    """CADEIA UNIFICADA V3.4: tenta 6 fontes EM ORDEM (1→6) para AO VIVO.
+       Retorna lista normalizada JÁ com origem_dados preenchido (sem odds/mercados ainda)."""
+    cadeia = _cadeia_todas_fontes_ordenadas()
+    for fonte, camada in cadeia:
+        try:
+            norm = _fonte_req_live(fonte, camada) or []
+            if not norm:
                 continue
-    # Nenhuma fonte com dado → chain cai pro fallback (quem chama faz)
+            # ao vivo: só aceita status EM_ANDAMENTO (evita retornar só jogos futuros no /live)
+            live_ao_vivo = [j for j in norm if j.get("status") == "EM_ANDAMENTO"]
+            if live_ao_vivo:
+                logger.info(
+                    f"FONTE VIVA {fonte['id']} ({camada}) → {len(live_ao_vivo)} jogos AO VIVO achados")
+                return live_ao_vivo
+            if norm:
+                logger.info(
+                    f"FONTE {fonte['id']} ({camada}) retornou {len(norm)} jogos mas nenhum LIVE "
+                    "(aceita mesmo assim)")
+                return norm[:15]
+        except Exception as e:
+            logger.warning(f"tentativa fonte {fonte.get('id')} live erro: {e}")
+            continue
     return []
 
 
 def _try_sources_por_data(data_ref: datetime) -> List[Dict[str, Any]]:
-    """CADEIA DATA ESPECÍFICA: tenta 4 fontes para JOGOS DE UMA DATA (inclui Football-Pro F10)."""
+    """CADEIA UNIFICADA V3.4: tenta 6 fontes EM ORDEM para JOGOS DE UMA DATA."""
     data_iso = _fmt_data_iso(data_ref)
-    ano = data_ref.year
-    for fonte in _RAPIDAPI_SOURCES:
-        origem = fonte["origem"]
-        host = fonte["host"]
-        path = fonte["date_path"]
-        pname = fonte["date_param"]
-        params_extra: Dict[str, Any] = {pname: data_iso}
-        if fonte["id"] == "API_FOOTBALL_V1_LEGACY":
-            params_extra["season"] = ano
-            params_extra["timezone"] = "America/Sao_Paulo"
-        elif fonte["id"] == "FOOTBALL_PRO_V3":
-            params_extra.setdefault("timezone", "America/Sao_Paulo")
-            params_extra.setdefault("season", ano)
-        else:
-            params_extra.setdefault("sport_id", 1)
-            params_extra.setdefault("locale", "en_INT")
-            params_extra.setdefault("page", 1)
+    cadeia = _cadeia_todas_fontes_ordenadas()
+    for fonte, camada in cadeia:
         try:
-            data = _req_host(host, path, params=params_extra, ttl=_CACHE_TTL_STATIC)
-            items = _extract_list_from_any(data)
-            if not items:
-                # se /list não tem data, tenta /live
-                for path2 in fonte["live_paths"][:2]:
-                    data2 = _req_host(host, path2, ttl=_CACHE_TTL_STATIC)
-                    items = _extract_list_from_any(data2)
-                    if items:
-                        break
-                if not items:
-                    continue
-            norm = []
-            if fonte["id"] in ("FLASHLIVE_SPORTS", "FREE_API_LIVE_FOOTBALL"):
-                mapper = _map_flashscore_item
-            else:
-                mapper = _map_legacy_apifootball_item
-            for ev in items:
-                ok = mapper(ev)
-                if ok:
-                    ok["origem_dados"] = origem
-                    ok["data"] = data_iso
-                    norm.append(ok)
+            norm = _fonte_req_data(fonte, camada, data_ref) or []
             if norm:
                 logger.info(
-                    f"FONTE {fonte['id']} ({data_iso}) → {len(norm)} partidas carregadas")
+                    f"FONTE {fonte.get('id')} ({camada}) ({data_iso}) → {len(norm)} partidas carregadas")
                 return norm
         except Exception as e:
-            logger.warning(f"tentativa fonte {fonte['id']} data erro: {e}")
+            logger.warning(f"tentativa fonte {fonte.get('id')} data erro: {e}")
             continue
     return []
+
+
+# ═══════════════════════════════════════════════════════════════════
+# STEP 1 · FUNÇÃO PÚBLICA: STATUS DE TODAS AS FONTES (para API Status Badge UI)
+# ═══════════════════════════════════════════════════════════════════
+def check_fontes_status(live_probe: bool = True) -> Dict[str, Any]:
+    """
+    Retorna status de TODAS as 6 fontes + fallback.
+    Estrutura:
+      {
+        "fontes": [{
+          "id": "FLASHLIVE_SPORTS", "ordem": 1, "label": "...", "camada": "RAPIDAPI",
+          "chave_configurada": True/False, "probe_online": True/False/"SKIP",
+          "latencia_ms": 210/"-", "ultimo_erro": ""/"HTTP 403",
+          "quantidade_jogos_recente": 12,
+        }, ...],
+        "fallback": {"ativa": True, "label": "IA do Tiago · Dinâmico"},
+        "fontes_online": 3, "fontes_chave_ok": 4, "total_fontes": 6,
+        "status_geral": "EXCELENTE" | "BOM" | "REDUZIDO" | "SOMENTE_FALLBACK"
+      }
+    """
+    cadeia = _cadeia_todas_fontes_ordenadas()
+    resumo_fontes: List[Dict[str, Any]] = []
+    chaves_ok = 0
+    online = 0
+    for fonte, camada in cadeia:
+        fid = fonte.get("id", "?")
+        ordem = int(fonte.get("ordem") or 999)
+        label = fonte.get("label") or fid
+
+        # A. Chave configurada?
+        if camada == "RAPIDAPI":
+            # Também lemos dinâmico para load_dotenv(override=True) funcionar
+            rapid_dinamico = (
+                os.getenv("RAPIDAPI_KEY")
+                or os.getenv("FOOTBALL_API_KEY")
+                or _RAPIDAPI_KEY
+                or ""
+            ).strip()
+            chave_configurada = bool(rapid_dinamico)
+        else:
+            chave_configurada = bool(_fonte_direta_chave(fonte))
+        if chave_configurada:
+            chaves_ok += 1
+
+        # B. Probe rápido (real HTTP ping no primeiro live_path)
+        probe_status: Any = "SKIP"
+        latencia: Any = "-"
+        ultimo_erro = ""
+        qtd_recente = 0
+        if live_probe and chave_configurada:
+            t0 = time.time()
+            try:
+                primeiro_live = (fonte.get("live_paths") or [""])[0]
+                if camada == "RAPIDAPI":
+                    host = fonte.get("host") or ""
+                    probe_data = _req_host(host, primeiro_live, ttl=4.0)
+                else:
+                    probe_data = _req_direct(fonte, primeiro_live, ttl=4.0)
+                items = _extract_list_from_any(probe_data)
+                qtd_recente = len(items)
+                probe_status = True if items or (isinstance(probe_data, dict) and probe_data) else "EMPTY"
+            except Exception as e:
+                probe_status = False
+                ultimo_erro = str(e)[:80]
+            finally:
+                lat_ms = int((time.time() - t0) * 1000)
+                latencia = lat_ms if lat_ms < 20000 else "TIMEOUT"
+        elif not chave_configurada:
+            ultimo_erro = "Chave não configurada no .env"
+
+        if probe_status is True or probe_status == "EMPTY":
+            online += 1
+
+        resumo_fontes.append({
+            "id": fid,
+            "ordem": ordem,
+            "label": label,
+            "camada": camada,
+            "origem_tag": fonte.get("origem"),
+            "chave_configurada": chave_configurada,
+            "probe_online": probe_status,
+            "latencia_ms": latencia,
+            "ultimo_erro": ultimo_erro,
+            "quantidade_jogos_recente": qtd_recente,
+        })
+
+    total_fontes = len(resumo_fontes)
+    fallback_info = {
+        "ativa": True,
+        "label": "IA do Tiago · Dinâmico",
+        "descricao": "Seed baseada em data: jogos reais de ligas 2025/26, sempre disponível.",
+    }
+    if online >= 5 and chaves_ok >= 5:
+        status_geral = "EXCELENTE"
+    elif online >= 3 and chaves_ok >= 3:
+        status_geral = "BOM"
+    elif online >= 1:
+        status_geral = "REDUZIDO"
+    else:
+        status_geral = "SOMENTE_FALLBACK"
+
+    return {
+        "assinatura": _SIGNATURE_IA_DO_TIAGO,
+        "versao": "3.4.0",
+        "gerado_em_utc": datetime.utcnow().isoformat() + "Z",
+        "fontes": sorted(resumo_fontes, key=lambda x: x["ordem"]),
+        "fallback": fallback_info,
+        "fontes_online": online,
+        "fontes_chave_ok": chaves_ok,
+        "total_fontes": total_fontes,
+        "status_geral": status_geral,
+    }
 
 
 def _finalizar_com_mercados_e_odds(jogos: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -575,60 +1070,95 @@ def _prever_mercados(
 
 
 def obter_jogos_ao_vivo() -> List[Dict[str, Any]]:
+    """Função PÚBLICA V3.4 — retorna jogos AO VIVO normalizados.
+
+    Ordem de prioridade:
+      1) CADEIA UNIFICADA _try_sources_live() (6 fontes: DIRECT primeiro depois RapidAPI)
+      2) Método LEGADO (_get_json /fixtures live=all → api-football-v1 default host)
+      3) FALLBACK IA DO TIAGO (seed dinâmica por data)
+
+    Aplica sempre _compat() no final para garantir aliases de campos legados.
+    """
+    cache_key = "PUBLIC_LIVE_ALL"
+    cached = _cache_get(cache_key)
+    if cached and isinstance(cached, list):
+        return cached
+
+    # ------------------------------------------------------------------
+    # 1) CADEIA UNIFICADA V3.4 (prioridade principal)
+    # ------------------------------------------------------------------
+    lista = _try_sources_live()
+    if lista:
+        saida = [_compat({**j, "assinatura": _SIGNATURE_IA_DO_TIAGO}) for j in lista]
+        _cache_set(cache_key, saida, _CACHE_TTL_LIVE)
+        return saida
+
+    # ------------------------------------------------------------------
+    # 2) Método LEGADO (compatibilidade)
+    # ------------------------------------------------------------------
     ttl = _CACHE_TTL_LIVE
     data = _get_json("/fixtures", params={"live": "all"}, ttl=ttl)
     resposta = data.get("response") or []
-    if not resposta or data.get("errors"):
-        return _fallback_live()
-    saida: List[Dict[str, Any]] = []
-    for item in resposta:
-        fx = item.get("fixture") or {}
-        tm = item.get("teams") or {}
-        gl = item.get("goals") or {}
-        lg = item.get("league") or {}
-        fid = fx.get("id")
-        minuto = fx.get("status", {}).get("elapsed")
-        status_short = (fx.get("status", {}).get("short") or "NS").upper()
-        if status_short in ("FT", "AET", "PEN", "BT", "WO"):
-            continue
-        status = "EM_ANDAMENTO" if status_short in ("1H", "HT", "2H", "ET", "LIVE", "INT") else "FUTURO"
-        odds = _extrair_odds(item)
-        gc = int(gl.get("home") or 0)
-        gf = int(gl.get("away") or 0)
-        stats = {}
-        if fid:
-            stats = _obter_estatisticas_partida(fid, ttl=_CACHE_TTL_LIVE)
-        mercados = _prever_mercados(odds, status, minuto, gc, gf, stats)
-        desfalques = _buscar_desfalques_resumo(
-            (tm.get("home") or {}).get("name"),
-            (tm.get("away") or {}).get("name"),
-        )
-        saida.append({
-            "fixture_id": fid,
-            "status": status,
-            "status_flag": "EM_ANDAMENTO" if status == "EM_ANDAMENTO" else "FUTURO",
-            "tempo_decorrido": minuto,
-            "status_curto": status_short,
-            "liga": lg.get("name"),
-            "liga_pais": (lg.get("country") or ""),
-            "liga_bandeira": (lg.get("flag") or ""),
-            "time_casa": (tm.get("home") or {}).get("name"),
-            "time_casa_logo": (tm.get("home") or {}).get("logo"),
-            "time_fora": (tm.get("away") or {}).get("name"),
-            "time_fora_logo": (tm.get("away") or {}).get("logo"),
-            "placar": f"{gc} x {gf}",
-            "placar_casa": gc,
-            "placar_fora": gf,
-            "estatisticas_live": stats,
-            "previsao_mercados": mercados,
-            "odds_1x2": odds,
-            "probabilidades_1x2_pct": mercados["vencedor"]["probabilidades_pct"],
-            "desfalques_alertas": desfalques,
-            "assinatura": _SIGNATURE_IA_DO_TIAGO,
-        })
-    if not saida:
-        return _fallback_live()
-    return saida
+    if resposta and not data.get("errors"):
+        saida: List[Dict[str, Any]] = []
+        for item in resposta:
+            fx = item.get("fixture") or {}
+            tm = item.get("teams") or {}
+            gl = item.get("goals") or {}
+            lg = item.get("league") or {}
+            fid = fx.get("id")
+            minuto = fx.get("status", {}).get("elapsed")
+            status_short = (fx.get("status", {}).get("short") or "NS").upper()
+            if status_short in ("FT", "AET", "PEN", "BT", "WO"):
+                continue
+            status = "EM_ANDAMENTO" if status_short in ("1H", "HT", "2H", "ET", "LIVE", "INT") else "FUTURO"
+            odds = _extrair_odds(item)
+            gc = int(gl.get("home") or 0)
+            gf = int(gl.get("away") or 0)
+            stats = {}
+            if fid:
+                stats = _obter_estatisticas_partida(fid, ttl=_CACHE_TTL_LIVE)
+            mercados = _prever_mercados(odds, status, minuto, gc, gf, stats)
+            desfalques = _buscar_desfalques_resumo(
+                (tm.get("home") or {}).get("name"),
+                (tm.get("away") or {}).get("name"),
+            )
+            saida.append(_compat({
+                "fixture_id": fid,
+                "status": status,
+                "status_flag": "EM_ANDAMENTO" if status == "EM_ANDAMENTO" else "FUTURO",
+                "tempo_decorrido": minuto,
+                "status_curto": status_short,
+                "liga": lg.get("name"),
+                "liga_pais": (lg.get("country") or ""),
+                "liga_bandeira": (lg.get("flag") or ""),
+                "time_casa": (tm.get("home") or {}).get("name"),
+                "time_casa_logo": (tm.get("home") or {}).get("logo"),
+                "time_fora": (tm.get("away") or {}).get("name"),
+                "time_fora_logo": (tm.get("away") or {}).get("logo"),
+                "placar": f"{gc} x {gf}",
+                "placar_casa": gc,
+                "placar_fora": gf,
+                "estatisticas_live": stats,
+                "previsao_mercados": mercados,
+                "odds_1x2": odds,
+                "probabilidades_1x2_pct": mercados["vencedor"]["probabilidades_pct"],
+                "desfalques_alertas": desfalques,
+                "assinatura": _SIGNATURE_IA_DO_TIAGO,
+                "origem_dados": "RAPIDAPI_LEGACY_V3",
+            }))
+        if saida:
+            _cache_set(cache_key, saida, _CACHE_TTL_LIVE)
+            return saida
+
+    # ------------------------------------------------------------------
+    # 3) Fallback IA DO TIAGO (última camada)
+    # ------------------------------------------------------------------
+    fb = [_compat({**j, "assinatura": _SIGNATURE_IA_DO_TIAGO,
+                    "origem_dados": j.get("origem_dados") or "IA_DO_TIAGO_DINAMICO"})
+          for j in _fallback_live()]
+    _cache_set(cache_key, fb, _CACHE_TTL_LIVE)
+    return fb
 
 
 def _obter_estatisticas_partida(fixture_id: int, ttl: float = _CACHE_TTL_LIVE) -> Dict[str, Any]:
@@ -713,75 +1243,109 @@ def _buscar_desfalques_resumo(casa: Optional[str], fora: Optional[str]) -> List[
 
 
 def obter_jogos_por_data(data_ref: datetime, status: str = "NS") -> List[Dict[str, Any]]:
+    """Função PÚBLICA V3.4 — jogos de uma data.
+
+    Ordem: 1) _try_sources_por_data (cadeia unificada 6 fontes)
+           2) Método legado _get_json /fixtures
+           3) _fallback_data
+    """
+    cache_key = f"PUBLIC_DATE::{_fmt_data_iso(data_ref)}"
+    cached = _cache_get(cache_key)
+    if cached and isinstance(cached, list):
+        return cached
+
+    # 1) Cadeia unificada
+    lista = _try_sources_por_data(data_ref)
+    if lista:
+        saida = [_compat({**j, "assinatura": _SIGNATURE_IA_DO_TIAGO}) for j in lista]
+        _cache_set(cache_key, saida, _CACHE_TTL_STATIC)
+        return saida
+
+    # 2) Método legado
     params = {"date": _fmt_data_iso(data_ref), "season": data_ref.year, "timezone": "America/Sao_Paulo"}
     resposta = _get_json("/fixtures", params=params, ttl=_CACHE_TTL_STATIC).get("response") or []
-    saida: List[Dict[str, Any]] = []
-    for item in resposta:
-        fx = item.get("fixture") or {}
-        tm = item.get("teams") or {}
-        gl = item.get("goals") or {}
-        lg = item.get("league") or {}
-        fid = fx.get("id")
-        status_short = (fx.get("status", {}).get("short") or "NS").upper()
-        minuto = fx.get("status", {}).get("elapsed")
-        em_andamento = status_short in ("1H", "HT", "2H", "ET", "LIVE", "INT")
-        st = "EM_ANDAMENTO" if em_andamento else (
-            "FIM" if status_short in ("FT", "AET", "PEN", "WO") else "FUTURO"
-        )
-        odds = _extrair_odds(item)
-        gc = int(gl.get("home") or 0)
-        gf = int(gl.get("away") or 0)
-        stats = _obter_estatisticas_partida(fid, ttl=_CACHE_TTL_LIVE) if em_andamento else {}
-        mercados = _prever_mercados(odds, st, minuto if em_andamento else None, gc, gf, stats)
-        horario = fx.get("date") or ""
-        horario_br = ""
-        try:
-            if horario:
-                dt = datetime.fromisoformat(horario.replace("Z", "+00:00"))
-                from datetime import timezone as _tz
-                dt_br = dt.astimezone(_tz(timedelta(hours=-3)))
-                horario_br = dt_br.strftime("%H:%M")
-        except Exception:
-            horario_br = horario[11:16] if len(horario) >= 16 else ""
-        saida.append({
-            "fixture_id": fid,
-            "origem_dados": "RAPIDAPI_REAL",
-            "status": st,
-            "status_flag": "EM_ANDAMENTO" if st == "EM_ANDAMENTO" else "FUTURO",
-            "tempo_decorrido": minuto if em_andamento else None,
-            "status_curto": status_short,
-            "data": _fmt_data_iso(data_ref),
-            "horario_br": horario_br,
-            "liga": lg.get("name"),
-            "liga_pais": (lg.get("country") or ""),
-            "liga_bandeira": (lg.get("flag") or ""),
-            "time_casa": (tm.get("home") or {}).get("name"),
-            "time_casa_logo": (tm.get("home") or {}).get("logo"),
-            "time_fora": (tm.get("away") or {}).get("name"),
-            "time_fora_logo": (tm.get("away") or {}).get("logo"),
-            "placar": f"{gc} x {gf}" if status_short != "NS" else horario_br,
-            "placar_casa": gc,
-            "placar_fora": gf,
-            "estatisticas_live": stats,
-            "previsao_mercados": mercados,
-            "odds_1x2": odds,
-            "probabilidades_1x2_pct": mercados["vencedor"]["probabilidades_pct"],
-            "desfalques_alertas": _buscar_desfalques_resumo(
-                (tm.get("home") or {}).get("name"),
-                (tm.get("away") or {}).get("name"),
-            ),
-            "assinatura": _SIGNATURE_IA_DO_TIAGO,
-        })
-    if not saida:
-        return _fallback_data(data_ref)
-    return saida
+    if resposta:
+        saida: List[Dict[str, Any]] = []
+        for item in resposta:
+            fx = item.get("fixture") or {}
+            tm = item.get("teams") or {}
+            gl = item.get("goals") or {}
+            lg = item.get("league") or {}
+            fid = fx.get("id")
+            status_short = (fx.get("status", {}).get("short") or "NS").upper()
+            minuto = fx.get("status", {}).get("elapsed")
+            em_andamento = status_short in ("1H", "HT", "2H", "ET", "LIVE", "INT")
+            st = "EM_ANDAMENTO" if em_andamento else (
+                "FIM" if status_short in ("FT", "AET", "PEN", "WO") else "FUTURO"
+            )
+            odds = _extrair_odds(item)
+            gc = int(gl.get("home") or 0)
+            gf = int(gl.get("away") or 0)
+            stats = _obter_estatisticas_partida(fid, ttl=_CACHE_TTL_LIVE) if em_andamento else {}
+            mercados = _prever_mercados(odds, st, minuto if em_andamento else None, gc, gf, stats)
+            horario = fx.get("date") or ""
+            horario_br = ""
+            try:
+                if horario:
+                    dt = datetime.fromisoformat(horario.replace("Z", "+00:00"))
+                    from datetime import timezone as _tz
+                    dt_br = dt.astimezone(_tz(timedelta(hours=-3)))
+                    horario_br = dt_br.strftime("%H:%M")
+            except Exception:
+                horario_br = horario[11:16] if len(horario) >= 16 else ""
+            saida.append(_compat({
+                "fixture_id": fid,
+                "origem_dados": "RAPIDAPI_LEGACY_V3",
+                "status": st,
+                "status_flag": "EM_ANDAMENTO" if st == "EM_ANDAMENTO" else "FUTURO",
+                "tempo_decorrido": minuto if em_andamento else None,
+                "status_curto": status_short,
+                "data": _fmt_data_iso(data_ref),
+                "horario_br": horario_br,
+                "liga": lg.get("name"),
+                "liga_pais": (lg.get("country") or ""),
+                "liga_bandeira": (lg.get("flag") or ""),
+                "time_casa": (tm.get("home") or {}).get("name"),
+                "time_casa_logo": (tm.get("home") or {}).get("logo"),
+                "time_fora": (tm.get("away") or {}).get("name"),
+                "time_fora_logo": (tm.get("away") or {}).get("logo"),
+                "placar": f"{gc} x {gf}" if status_short != "NS" else horario_br,
+                "placar_casa": gc,
+                "placar_fora": gf,
+                "estatisticas_live": stats,
+                "previsao_mercados": mercados,
+                "odds_1x2": odds,
+                "probabilidades_1x2_pct": mercados["vencedor"]["probabilidades_pct"],
+                "desfalques_alertas": _buscar_desfalques_resumo(
+                    (tm.get("home") or {}).get("name"),
+                    (tm.get("away") or {}).get("name"),
+                ),
+                "assinatura": _SIGNATURE_IA_DO_TIAGO,
+            }))
+        if saida:
+            _cache_set(cache_key, saida, _CACHE_TTL_STATIC)
+            return saida
+
+    # 3) Fallback IA
+    fb = [_compat({**j, "assinatura": _SIGNATURE_IA_DO_TIAGO})
+          for j in _fallback_data(data_ref)]
+    _cache_set(cache_key, fb, _CACHE_TTL_STATIC)
+    return fb
 
 
 def obter_jogos_hoje() -> List[Dict[str, Any]]:
     live = obter_jogos_ao_vivo()
     hoje = obter_jogos_por_data(datetime.now())
-    ids = {j["fixture_id"] for j in live}
-    return live + [j for j in hoje if j["fixture_id"] not in ids]
+    ids = set()
+    dedup: List[Dict[str, Any]] = []
+    for j in live + hoje:
+        fid = j.get("fixture_id")
+        chave = (fid, j.get("time_casa"), j.get("time_fora"))
+        if chave in ids:
+            continue
+        ids.add(chave)
+        dedup.append(j)
+    return dedup
 
 
 def obter_jogos_amanha() -> List[Dict[str, Any]]:

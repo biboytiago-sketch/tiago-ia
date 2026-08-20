@@ -2,9 +2,24 @@ import os
 import json
 from datetime import datetime, date, timedelta
 from typing import List, Optional, Dict, Any
-from dotenv import load_dotenv
 
-# Carrega .env da pasta backend/ (caminho absoluto)
+def _carregar_dotenv_manual(caminho_abs: str, override: bool = False):
+    if not os.path.exists(caminho_abs):
+        return
+    with open(caminho_abs, "r", encoding="utf-8") as f:
+        for linha in f:
+            linha = linha.strip()
+            if not linha or linha.startswith("#") or "=" not in linha:
+                continue
+            chave, valor = linha.split("=", 1)
+            chave = chave.strip()
+            valor = valor.strip()
+            if (valor.startswith('"') and valor.endswith('"')) or (valor.startswith("'") and valor.endswith("'")):
+                valor = valor[1:-1]
+            if not override and os.getenv(chave) is not None:
+                continue
+            os.environ[chave] = valor
+
 _DOTENV_CANDIDATOS = [
     os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".env"),
@@ -13,7 +28,7 @@ _DOTENV_CANDIDATOS = [
 for _p in _DOTENV_CANDIDATOS:
     _abs = os.path.abspath(_p)
     if os.path.exists(_abs):
-        load_dotenv(_abs, override=False)
+        _carregar_dotenv_manual(_abs, override=False)
         break
 
 from fastapi import FastAPI, HTTPException, Request, Query
@@ -175,6 +190,54 @@ def registrar_pos_jogo_red(jogo_id: str, motivo: str, valor_perdido: float = 50.
 
 @app.on_event("startup")
 def startup_event():
+    # ============================================================
+    #  STEP 1 · Verificação de ENV VARS no startup (Live Sports)
+    # ============================================================
+    REQUIRED_VARS_SOFT_CHECK: List[Dict[str, Any]] = [
+        {"key": "GEMINI_API_KEY",        "label": "Google Gemini AI",     "tipo": "IA Principal"},
+        {"key": "RAPIDAPI_KEY",          "label": "RapidAPI Unificada",  "tipo": "RapidAPI (Fontes 1-4)"},
+        {"key": "FOOTBALL_API_KEY",      "label": "RapidAPI (Legado)",   "tipo": "Compatibilidade"},
+        {"key": "API_FOOTBALL_KEY",      "label": "API-Football DIRETO", "tipo": "Fonte 5 (api-football.com)"},
+        {"key": "FOOTBALL_DATA_ORG_KEY", "label": "Football-Data.org",   "tipo": "Fonte 6 (Free Tier)"},
+        {"key": "RAPIDAPI_HOST_FLASHLIVE",      "label": "RapidAPI · FlashLive",      "tipo": "Fonte 1 Host"},
+        {"key": "RAPIDAPI_HOST_FREEAPI",        "label": "RapidAPI · FreeAPI",        "tipo": "Fonte 2 Host"},
+        {"key": "RAPIDAPI_HOST_LEGACY",         "label": "RapidAPI · API-Football",   "tipo": "Fonte 3 Host"},
+        {"key": "RAPIDAPI_HOST_FOOTBALL_PRO",   "label": "RapidAPI · Football-Pro",   "tipo": "Fonte 4 Host"},
+    ]
+    try:
+        print("\n" + "=" * 72)
+        print("  IA do Tiago · BACKEND STARTUP — Verificação de Chaves API")
+        print("=" * 72)
+        env_resumo: Dict[str, Any] = {"chaves_ok": 0, "chaves_faltando": 0, "chaves_placeholder": 0, "detalhes": []}
+        for item in REQUIRED_VARS_SOFT_CHECK:
+            raw = (os.getenv(item["key"]) or "").strip()
+            is_placeholder = (not raw) or any(x in raw.lower() for x in ("sua_chave", "your_key", "xxx", "<", "cole_aqui", "aqui"))
+            tem_valor = bool(raw) and not is_placeholder
+            status = "✅ OK" if tem_valor else ("⚠️  PLACEHOLDER" if raw else "❌ FALTANDO")
+            if tem_valor:
+                env_resumo["chaves_ok"] += 1
+                mascarado = raw[:4] + ("*" * max(0, len(raw) - 8)) + raw[-4:] if len(raw) >= 10 else ("*" * len(raw))
+            else:
+                env_resumo["chaves_faltando"] += 1
+                mascarado = "(vazio)" if not raw else raw
+            env_resumo["detalhes"].append({
+                "chave": item["key"],
+                "label": item["label"],
+                "tipo": item["tipo"],
+                "status": status.split()[0] if status.split() else "?",
+                "mascarado": mascarado,
+            })
+            print(f"  {status:<16}  {item['label']:<26} [{item['key']:<24}]  →  {mascarado}")
+        print("-" * 72)
+        print(f"  Resumo: ✅ {env_resumo['chaves_ok']} ok  ·  ❌ {env_resumo['chaves_faltando']} vazias/placeholder")
+        print("  Backend continua rodando (fallbacks IA do Tiago garantem UX mesmo sem chaves.)")
+        print("=" * 72 + "\n")
+        # Salva em variável global do app para o endpoint /api-status consultar depois
+        app.state.env_vars_check = env_resumo
+    except Exception as e:
+        print(f"[startup] verificação env vars falhou: {e}")
+        app.state.env_vars_check = {"chaves_ok": 0, "chaves_faltando": 99, "erro": str(e), "detalhes": []}
+
     try:
         init_db()
         print("Banco de dados inicializado com sucesso.")
@@ -207,6 +270,60 @@ def health_check():
 @app.get("/ping", tags=["health"])
 def ping_check():
     return "pong"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# STEP 1 · API STATUS BADGE (para dashboard UI Flutter)
+# ═══════════════════════════════════════════════════════════════════
+@app.get("/api/v1/sports/api-status", tags=["sports-v1", "status-badge"])
+@app.get("/api/v3/sports/api-status", tags=["sports-v3", "status-badge"])
+def sports_api_status(
+    probe: bool = Query(True, description="Faz probe HTTP real em cada fonte (4s timeout cada)"),
+):
+    """
+    Retorna status consolidado de TODAS as 6 fontes + fallback IA.
+    Usado pelo **API Status Badge** na tela inicial do Flutter.
+
+    Resposta inclui:
+      - status_geral: EXCELENTE / BOM / REDUZIDO / SOMENTE_FALLBACK
+      - fontes_online, fontes_chave_ok, total_fontes
+      - lista detalhada: chave_configurada, probe_online, latencia_ms, qtd_jogos_recente, ultimo_erro
+      - env_vars_check (resultado da verificação no startup, com chaves MASCARADAS)
+    """
+    try:
+        probe_bool = bool(probe)
+    except Exception:
+        probe_bool = True
+    try:
+        status_fontes = _lsv_check_fontes_status(live_probe=probe_bool)
+    except Exception as e:
+        status_fontes = {
+            "status_geral": "ERRO_INTERNO",
+            "fontes": [],
+            "fallback": {"ativa": True, "label": "IA do Tiago · Dinâmico"},
+            "fontes_online": 0,
+            "fontes_chave_ok": 0,
+            "total_fontes": 6,
+            "erro_checagem": str(e)[:200],
+        }
+    # Anexa verificação de env vars do startup (mascara todas as chaves — NÃO EXPÕE secrets)
+    env_check = getattr(app.state, "env_vars_check", {
+        "chaves_ok": 0, "chaves_faltando": 99,
+        "detalhes": [], "erro": "startup_check_nao_executou",
+    })
+    return {
+        "assinatura": "IA do Tiago · Live Sports v3.4 · Oficial",
+        "versao": "3.4.0",
+        "gerado_em_utc": datetime.utcnow().isoformat() + "Z",
+        "status_geral": status_fontes.get("status_geral", "SOMENTE_FALLBACK"),
+        "fontes_online": status_fontes.get("fontes_online", 0),
+        "fontes_chave_ok": status_fontes.get("fontes_chave_ok", 0),
+        "total_fontes": status_fontes.get("total_fontes", 6),
+        "fallback": status_fontes.get("fallback", {"ativa": True}),
+        "fontes": status_fontes.get("fontes", []),
+        "env_vars_check": env_check,
+        "cache_ttl_segundos": 15 if probe_bool else 300,
+    }
 
 
 class LoginRequest(BaseModel):
@@ -1675,6 +1792,7 @@ from services.live_sports_service import (
     jogos_ranqueados_hoje as _lsv_jogos_ranqueados_hoje,
     gerar_bilhetes_ia as _lsv_gerar_bilhetes_ia,
     _origem_dados_global as _lsv_origem_geral,
+    check_fontes_status as _lsv_check_fontes_status,
 )
 from services.crypto_service import (
     get_crypto_signals_v2 as _crypto_v2_resumo,
