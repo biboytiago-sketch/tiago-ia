@@ -467,6 +467,7 @@ def health_check():
 
 
 @app.get("/ping", tags=["health"])
+@app.head("/ping", tags=["health"])
 def ping_check():
     return "pong"
 

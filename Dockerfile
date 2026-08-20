@@ -24,4 +24,5 @@ EXPOSE 8000
 # 4. Startup FINAL usando shell form (sh -c) para EXPANDIR $PORT corretamente.
 #    Render injeta PORT=10000 em runtime; caindo para 8000 se estiver vazio (localhost).
 #    OBS: NAO usar CMD ["array", "json"] aqui pq ele NAO expande variaveis de ambiente!
-CMD sh -c "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1 --proxy-headers --forwarded-allow-ips '*'"
+#    OBS2: Removido --forwarded-allow-ips '*' por enquanto (evita glob expansion bug no sh-slim).
+CMD sh -c "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1 --proxy-headers"
