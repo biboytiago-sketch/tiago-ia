@@ -2,6 +2,7 @@ FROM python:3.11-slim
 
 LABEL maintainer="Tiago IA Backend v3.4"
 LABEL description="Live Sports Unified Fetcher + IA do Tiago. Docker mode, usado no Render tiago-ia-1."
+LABEL build.hash_forcado_clear_cache="2026-08-19-v34-api-status-fix-8302354-NAO-PODE-USAR-CACHE-ANTIGO-JAMAIS"
 
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
