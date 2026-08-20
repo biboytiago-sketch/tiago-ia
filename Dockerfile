@@ -2,7 +2,7 @@ FROM python:3.11-slim
 
 LABEL maintainer="Tiago IA Backend v3.4"
 LABEL description="Live Sports Unified Fetcher + IA do Tiago. Docker mode, usado no Render tiago-ia-1."
-LABEL build.hash_forcado_clear_cache="2026-08-20-v37-SPORTBET-MODE-91-jogos-por-dia-17-ligas-globais-aliases-arrays-em-todas-rotas-V3-BASE-DEFAULT-RENDER-NAO-MAIS-IP-LAN-5G-FUNCIONA"
+LABEL build.hash_forcado_clear_cache="2026-08-20-v38-COMPAT-GARANTIA-100PORCENTO-MERCADOS-odds-previsao_mercados-NUNCA-MAIS-NULL-+-FLUTTER-RENDER-DEFAULT-+-TIMEOUTS-30-45s"
 
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
