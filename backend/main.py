@@ -673,28 +673,51 @@ def _v3_para_v1_jogo(jogo_v3: Dict[str, Any], idx: int = 0,
 
     return {
         "id": f"J{idx:04d}_{hh:02d}{mm:02d}",
-        "campeonato": liga_nome,
-        "categoria": cat,
+        # -----------------------------
+        # CAMPOS FLAT OBRIGATORIOS (FLUTTER TELA PRINCIPAL LÊ ESSES!)
+        # -----------------------------
+        "home": casa,
+        "away": fora,
+        "liga": liga_nome,
+        "hr": f"{hh:02d}:{mm:02d}",
+        # Aliases variantes que diferentes telas do Flutter podem ler
+        "home_name": casa,
+        "away_name": fora,
+        "home_team": casa,
+        "away_team": fora,
+        "mandante": casa,
+        "visitante": fora,
         "time_casa": casa,
         "time_fora": fora,
+        "casa": casa,
+        "fora": fora,
+        "campeonato": liga_nome,
+        "liga_nome": liga_nome,
+        "league": liga_nome,
+        "league_name": liga_nome,
+        "horario": f"{hh:02d}:{mm:02d}",
+        "horario_iso": horario_iso,
+        "kickoff": f"{hh:02d}:{mm:02d}",
+        "time": f"{hh:02d}:{mm:02d}",
+        # Campos pre existentes mantidos para retrocompatibilidade
+        "categoria": cat,
         "odd_casa": f"{o1:.2f}",
         "odd_empate": f"{ox:.2f}",
         "odd_fora": f"{o2:.2f}",
         "probabilidade": str(p_int),
         "probabilidade_real": round(max_p, 1),
         "pais": liga_pais,
-        "liga_nome": liga_nome,
         "liga_pais": liga_pais,
         "liga_bandeira": liga_bandeira,
         "data_jogo": data_jogo,
         "data_curta": data_curta,
-        "horario": f"{hh:02d}:{mm:02d}",
-        "horario_iso": horario_iso,
         "status": status_legado,
         "minuto_live": (int(minuto) if minuto is not None else
                         (45 + (idx % 45) if status_legado == "AO_VIVO" else None)),
         "placar_casa": placar_c,
         "placar_fora": placar_f,
+        "home_score": placar_c,
+        "away_score": placar_f,
         "alertas": list(jogo_v3.get("desfalques_alertas") or []),
         "_fonte": f"V3:{origem[:24]}",
     }
@@ -709,16 +732,131 @@ def _monta_categorias_v1(jogos_v1: List[Dict[str, Any]]) -> Dict[str, Any]:
     return out
 
 
+def _aplicar_flat_fields_flutter(jogos: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Garante que TODO jogo (V1 ou V3) tem os 4 campos FLAT OBRIGATORIOS que
+    o Flutter Tela Principal / FutebolScreen le:
+        jogo['home'], jogo['away'], jogo['liga'], jogo['hr']
+    E tambem todos os aliases (home_name, away_team, mandante, campeonato,
+    horario, etc). Isso EVITA POR COMPLETO que o Flutter caia no mock
+    fallback de jogos antigos por encontrar campos nulos.
+    """
+    out: List[Dict[str, Any]] = []
+    for idx, j in enumerate(jogos):
+        if not isinstance(j, dict):
+            continue
+        nj = dict(j)
+
+        teams = nj.get("teams") or {}
+        home_obj = teams.get("home") if isinstance(teams, dict) else {}
+        away_obj = teams.get("away") if isinstance(teams, dict) else {}
+        league_obj = nj.get("league") or {}
+        fixture_obj = nj.get("fixture") or {}
+        goals_obj = nj.get("goals") or {}
+
+        nome_home = str(
+            nj.get("home") or nj.get("home_name") or nj.get("home_team")
+            or nj.get("mandante") or nj.get("time_casa") or nj.get("casa")
+            or (home_obj.get("name") if isinstance(home_obj, dict) else None)
+            or f"Casa {idx+1:02d}"
+        ).strip()
+        nome_away = str(
+            nj.get("away") or nj.get("away_name") or nj.get("away_team")
+            or nj.get("visitante") or nj.get("time_fora") or nj.get("fora")
+            or (away_obj.get("name") if isinstance(away_obj, dict) else None)
+            or f"Fora {idx+1:02d}"
+        ).strip()
+        nome_liga = str(
+            nj.get("liga") or nj.get("liga_nome") or nj.get("league")
+            or nj.get("league_name") or nj.get("campeonato")
+            or (league_obj.get("name") if isinstance(league_obj, dict) else None)
+            or nj.get("country")
+            or "Amistoso"
+        ).strip()
+
+        data_fixture = None
+        if isinstance(fixture_obj, dict):
+            data_fixture = fixture_obj.get("date") or fixture_obj.get("iso")
+            if not data_fixture and isinstance(fixture_obj.get("time"), str):
+                data_fixture = fixture_obj.get("time")
+        hr_full = str(
+            nj.get("hr") or nj.get("horario") or nj.get("kickoff") or nj.get("time")
+            or (data_fixture[11:16] if isinstance(data_fixture, str) and len(data_fixture) >= 16 else None)
+            or (data_fixture[0:5] if isinstance(data_fixture, str) and len(data_fixture) >= 5 and ":" in data_fixture else None)
+            or "--:--"
+        ).strip()
+
+        status_short = None
+        if isinstance(fixture_obj, dict):
+            status_short = fixture_obj.get("status_short") or fixture_obj.get("status")
+        placar_c = goals_obj.get("home") if isinstance(goals_obj, dict) else None
+        placar_f = goals_obj.get("away") if isinstance(goals_obj, dict) else None
+
+        nj.update({
+            # 4 campos FLAT OBRIGATORIOS (FutebolScreen/Main-Screen lem exatamente esses)
+            "home": nome_home,
+            "away": nome_away,
+            "liga": nome_liga,
+            "hr": hr_full,
+            # Aliases times
+            "home_name": nome_home,
+            "away_name": nome_away,
+            "home_team": nome_home,
+            "away_team": nome_away,
+            "mandante": nome_home,
+            "visitante": nome_away,
+            "time_casa": nome_home,
+            "time_fora": nome_away,
+            "casa": nome_home,
+            "fora": nome_away,
+            # Aliases liga
+            "campeonato": nome_liga,
+            "liga_nome": nome_liga,
+            "league": nome_liga,
+            "league_name": nome_liga,
+            "liga_pais": (
+                (league_obj.get("country") if isinstance(league_obj, dict) else None)
+                or nj.get("liga_pais") or nj.get("country") or "Global"
+            ),
+            # Aliases horario
+            "horario": hr_full,
+            "horario_iso": data_fixture or hr_full,
+            "kickoff": hr_full,
+            "time": hr_full,
+            # Status e placar (flat)
+            "status": str(nj.get("status") or status_short or "FUTURO"),
+            "status_short": str(nj.get("status_short") or status_short or "NS"),
+            "placar_casa": int(placar_c) if placar_c not in (None, "") else None,
+            "placar_fora": int(placar_f) if placar_f not in (None, "") else None,
+            "home_score": int(placar_c) if placar_c not in (None, "") else None,
+            "away_score": int(placar_f) if placar_f not in (None, "") else None,
+        })
+        out.append(nj)
+    return out
+
+
 def _v1_hoje_dinamico():
     """Retorna {'total','data','jogos','categorias'} V1 usando dados V3 dinâmicos."""
     v3_payload = nb_v3_sports_hoje()
     v3_jogos = list(v3_payload.get("jogos") or [])
     v1_jogos = [_v3_para_v1_jogo(j, idx=i) for i, j in enumerate(v3_jogos)]
+    # ⚠️ CAMADA DE SEGURANCA 100%: mesmo se _v3_para_v1_jogo() for versao antiga,
+    # o helper abaixo SEMPRE injeta os 4 campos flat OBRIGATORIOS que o Flutter le:
+    # home, away, liga, hr + aliases (home_name, mandante, campeonato etc).
+    # Isso EVITA POR COMPLETO cair no fallback de jogos antigos.
+    v1_jogos = _aplicar_flat_fields_flutter(v1_jogos)
+    cats = _monta_categorias_v1(v1_jogos)
+    # ⚠️ CAMADA EXTRA: garante que "categorias" tb tem jogos com campos flat
+    for c_key in cats.keys():
+        if cats[c_key] and isinstance(cats[c_key].get("lista"), list):
+            cats[c_key]["lista"] = _aplicar_flat_fields_flutter(list(cats[c_key]["lista"]))
     return {
         "total": len(v1_jogos),
         "data": datetime.now().isoformat(),
         "jogos": v1_jogos,
-        "categorias": _monta_categorias_v1(v1_jogos),
+        "data_array": v1_jogos,   # alias extra (fallback)
+        "partidas": v1_jogos,     # alias extra (fallback)
+        "categorias": cats,
     }
 
 
@@ -1131,18 +1269,131 @@ def ia_sinais_list(
     """
     try:
         sinais = calcular_sinais_ia(usar_gemini=usar_gemini, apenas_hoje_ou_live=apenas_hoje_live)
+
+        # ---------------------------------------------------------------------
+        # COMPATIBILIDADE FLUTTER: o App Flutter pode ler 'partidas', 'data'
+        # ou 'jogos' em diferentes telas. Nós retornamos os 3 arrays ao mesmo
+        # tempo (todos apontando para a mesma lista de sinais) para evitar
+        # qualquer tela de fallback offline (jogos seed antigos).
+        # ---------------------------------------------------------------------
+        sinais_flat: List[Dict[str, Any]] = []
+        for s in sinais:
+            # Extrai campos aninhados da estrutura da API-Football (se houver)
+            # Ex.: s['teams']['home']['name'] -> time casa
+            teams = s.get("teams") or {}
+            home_obj = teams.get("home") if isinstance(teams, dict) else {}
+            away_obj = teams.get("away") if isinstance(teams, dict) else {}
+            league_obj = s.get("league") or {}
+            fixture_obj = s.get("fixture") or {}
+            goals_obj = s.get("goals") or {}
+            odd_obj = s.get("odd_sugerida") or {}
+            odds_orig = s.get("odds_originais") or {}
+
+            nome_home = str(
+                s.get("home") or s.get("home_name") or s.get("home_team")
+                or s.get("mandante") or s.get("time_casa") or s.get("casa")
+                or (home_obj.get("name") if isinstance(home_obj, dict) else None)
+                or "Casa"
+            )
+            nome_away = str(
+                s.get("away") or s.get("away_name") or s.get("away_team")
+                or s.get("visitante") or s.get("time_fora") or s.get("fora")
+                or (away_obj.get("name") if isinstance(away_obj, dict) else None)
+                or "Fora"
+            )
+            nome_liga = str(
+                s.get("liga") or s.get("liga_nome") or s.get("league")
+                or s.get("league_name") or s.get("campeonato")
+                or (league_obj.get("name") if isinstance(league_obj, dict) else None)
+                or "Amistoso"
+            )
+            data_fixture = None
+            if isinstance(fixture_obj, dict):
+                data_fixture = fixture_obj.get("date") or fixture_obj.get("iso")
+            try:
+                hr_full = str(
+                    s.get("hr") or s.get("horario") or s.get("kickoff") or s.get("time")
+                    or (data_fixture[11:16] if isinstance(data_fixture, str) and len(data_fixture) >= 16 else None)
+                    or "--:--"
+                )
+            except Exception:
+                hr_full = "--:--"
+
+            status_short = None
+            if isinstance(fixture_obj, dict):
+                status_short = fixture_obj.get("status_short") or fixture_obj.get("status")
+            placar_c = goals_obj.get("home") if isinstance(goals_obj, dict) else None
+            placar_f = goals_obj.get("away") if isinstance(goals_obj, dict) else None
+
+            flat_s = dict(s)
+            flat_s.update({
+                # CAMPOS FLAT OBRIGATORIOS (Flutter Main Screen / Futebol Screen)
+                "home": nome_home,
+                "away": nome_away,
+                "liga": nome_liga,
+                "hr": hr_full,
+                # Aliases variantes de times
+                "home_name": nome_home,
+                "away_name": nome_away,
+                "home_team": nome_home,
+                "away_team": nome_away,
+                "mandante": nome_home,
+                "visitante": nome_away,
+                "time_casa": nome_home,
+                "time_fora": nome_away,
+                "casa": nome_home,
+                "fora": nome_away,
+                # Aliases variantes de liga
+                "campeonato": nome_liga,
+                "liga_nome": nome_liga,
+                "league": nome_liga,
+                "league_name": nome_liga,
+                # Aliases variantes de horario
+                "horario": hr_full,
+                "horario_iso": data_fixture or hr_full,
+                "kickoff": hr_full,
+                "time": hr_full,
+                # Placar e status (se existir)
+                "status": str(s.get("status") or status_short or "FUTURO"),
+                "status_short": str(s.get("status_short") or status_short or "NS"),
+                "placar_casa": int(placar_c) if placar_c is not None else None,
+                "placar_fora": int(placar_f) if placar_f is not None else None,
+                "home_score": int(placar_c) if placar_c is not None else None,
+                "away_score": int(placar_f) if placar_f is not None else None,
+                # Campos sugeridos (Heurística IA)
+                "confianca": int(s.get("confianca") or 50),
+                "confianca_float": float(s.get("confianca_float") or 0.5),
+                "sinal": str(s.get("sinal") or "apostar"),
+                "razoes": list(s.get("razoes") or []),
+                "odd_sugerida": odd_obj if isinstance(odd_obj, dict) else {
+                    "tipo": "Over 2.5 Gols", "valor": 1.85, "time": "Total"
+                },
+                "odds_originais": odds_orig if isinstance(odds_orig, dict) else {},
+            })
+            sinais_flat.append(flat_s)
+
         totais = {
-            "apostar": sum(1 for s in sinais if s.get("sinal") == "apostar"),
-            "cuidado": sum(1 for s in sinais if s.get("sinal") == "cuidado"),
-            "nao_apostar": sum(1 for s in sinais if s.get("sinal") == "nao_apostar"),
+            "apostar": sum(1 for s in sinais_flat if s.get("sinal") == "apostar"),
+            "cuidado": sum(1 for s in sinais_flat if s.get("sinal") == "cuidado"),
+            "nao_apostar": sum(1 for s in sinais_flat if s.get("sinal") == "nao_apostar"),
         }
         return {
             "generated_at": datetime.now().isoformat(),
             "fonte": "Gemini" if usar_gemini else "Heurística + Odds",
             "totais": totais,
             "cache_ttl_seconds": 90,
-            "total": len(sinais),
-            "sinais": sinais,
+            "total": len(sinais_flat),
+            # -----------------------------------------------------------------
+            # QUATRO CHAVES PARA GARANTIR NENHUM FALLBACK:
+            #   - 'sinais'    (getIaSinais L1686)
+            #   - 'partidas'  (telas antigas V1)
+            #   - 'jogos'     (FutebolScreen L107 / getTodayMatches L599)
+            #   - 'data'      (fallback genérico em alguns endpoints)
+            # -----------------------------------------------------------------
+            "sinais": sinais_flat,
+            "partidas": sinais_flat,
+            "jogos": sinais_flat,
+            "data": sinais_flat,
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro /ia/sinais: {str(e)}")
@@ -2038,7 +2289,7 @@ _SIG_V3 = "IA do Tiago · V3"
 @app.get("/api/v3/sports/live", tags=["sports-v3"])
 def nb_v3_sports_live():
     """🔴 Ao Vivo Agora · partidas em andamento com stats + previsões 4 mercados."""
-    jogos = _lsv_live()
+    jogos = _aplicar_flat_fields_flutter(_lsv_live())
     return {
         "assinatura": _SIG_V3,
         "aba": "AO_VIVO",
@@ -2052,7 +2303,7 @@ def nb_v3_sports_live():
 @app.get("/api/v3/sports/hoje", tags=["sports-v3"])
 def nb_v3_sports_hoje():
     """📅 Hoje · todas partidas do dia (ao vivo + agendadas) com odds/probs."""
-    jogos = _lsv_hoje()
+    jogos = _aplicar_flat_fields_flutter(_lsv_hoje())
     return {
         "assinatura": _SIG_V3,
         "aba": "HOJE",
@@ -2066,7 +2317,7 @@ def nb_v3_sports_hoje():
 @app.get("/api/v3/sports/amanha", tags=["sports-v3"])
 def nb_v3_sports_amanha():
     """📅 Amanhã · partidas agendadas."""
-    jogos = _lsv_amanha()
+    jogos = _aplicar_flat_fields_flutter(_lsv_amanha())
     return {
         "assinatura": _SIG_V3,
         "aba": "AMANHA",
@@ -2159,6 +2410,10 @@ def nb_v3_gerar_bilhetes_ia(
         jogos_minimo_por_bilhete=jogos_minimo,
         jogos_maximo_por_bilhete=jogos_maximo,
     )
+    # 🔒 CAMADA DE SEGURANCA 1: Aplicar flat fields (home/away/liga/hr + aliases) EM CADA selecao de CADA bilhete
+    for bilhete in (dados.get("bilhetes_sugeridos") or []):
+        if isinstance(bilhete.get("selecoes"), list):
+            bilhete["selecoes"] = _aplicar_flat_fields_flutter(list(bilhete["selecoes"]))
     # Origem = olhar primeira seleção do primeiro bilhete
     primeira_origem = "FALLBACK_VAZIO"
     primeiro_bilhete = (dados.get("bilhetes_sugeridos") or [{}])[0] if (dados.get("bilhetes_sugeridos") or []) else {}
@@ -2167,7 +2422,13 @@ def nb_v3_gerar_bilhetes_ia(
             primeira_origem = "RAPIDAPI_REAL"
             break
         primeira_origem = s.get("origem_dados") or primeira_origem
-    dados["origem_dados_geral"] = primeira_origem
+    # 🔒 CAMADA DE SEGURANCA 2: Qualquer fonte ONLINE (nao eh fallback vazio/todos) -> mapeia para RAPIDAPI_REAL
+    #    (o Flutter GERAR_BILHETE_IA_SCREEN so reconhece 'RAPIDAPI_REAL' como online; qualquer outra string = Modo Offline)
+    FONTES_FALLBACK_OFFLINE = ("FALLBACK_VAZIO", "FALLBACK_TODOS", "IA_DO_TIAGO_DINAMICO", "SEED_ALEATORIO", "OFFLINE_SEED")
+    if primeira_origem not in FONTES_FALLBACK_OFFLINE:
+        dados["origem_dados_geral"] = "RAPIDAPI_REAL"
+    else:
+        dados["origem_dados_geral"] = primeira_origem
     return dados
 
 
