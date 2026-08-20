@@ -1,11 +1,18 @@
 FROM python:3.11-slim
 
-LABEL maintainer="Tiago IA Backend v3.4"
+LABEL maintainer="Tiago IA Backend v3.5"
 LABEL description="Live Sports Unified Fetcher + IA do Tiago. Docker mode, usado no Render tiago-ia-1."
-LABEL build.hash_forcado_clear_cache="2026-08-20-v38-COMPAT-GARANTIA-100PORCENTO-MERCADOS-odds-previsao_mercados-NUNCA-MAIS-NULL-+-FLUTTER-RENDER-DEFAULT-+-TIMEOUTS-30-45s"
+LABEL build.hash_forcado_clear_cache="2026-08-20-v39-CRITICAL-PURGE-CACHE-V3-LIVE-PRIMEIRO-0-MOCKS-STRICT-EMPTY-STATE-DART-FLUTTER-SHARED-PREFS-FORCE-REFRESH-60S"
 
+# =======================================================================
+# HARDCODED NO-DOCKERFILE-STRICT: evita que cache de build do Render use
+# a layer antiga de football_service.py com os 12 mocks Newcastle/Arsenal.
+# NÃO depende mais de env var do painel Render.
+# =======================================================================
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
+ENV ALLOW_SINAIS_FALLBACK_MOCK=0
+ENV GEMINI_TICKET_TIMEOUT_SECONDS=45
 
 WORKDIR /app
 
