@@ -518,14 +518,23 @@ def get_today_matches(qtd_minima: int = 12):
     """
     Retorna jogos de HOJE. Primeiro tenta API-Football, depois fallback simulado.
     Garante pelo menos `qtd_minima` jogos.
+
+    STRICT MODE (2026-08-20 v39): se ALLOW_SINAIS_FALLBACK_MOCK != 1, NÃO usa
+    gerar_jogo_simulado() — evita que os seeds fixos (Newcastle×Atalanta etc)
+    sejam gerados e apareçam congelados na UI.
     """
+    import os as _os_env
+    allow_mock_fill = (_os_env.getenv("ALLOW_SINAIS_FALLBACK_MOCK", "0").strip().lower()
+                       in ("1", "true", "sim", "yes", "s"))
+
     hoje_sp = datetime.now(timezone(timedelta(hours=-3)))
     data_iso = hoje_sp.strftime("%Y-%m-%d")
     jogos_reais = _fetch_fixtures_api(data_iso) or []
-    # Completa com simulados se API devolveu poucos jogos (ex: horários que ainda não tem jogos)
-    while len(jogos_reais) < qtd_minima:
-        sim = gerar_jogo_simulado(len(jogos_reais), dia_offset=0)
-        jogos_reais.append(sim)
+    # STRICT: completa com simulados SOMENTE se o dev setou a flag.
+    if allow_mock_fill:
+        while len(jogos_reais) < qtd_minima:
+            sim = gerar_jogo_simulado(len(jogos_reais), dia_offset=0)
+            jogos_reais.append(sim)
 
     # Ordenação PRIORIDADE: AO_VIVO primeiro, depois PROXIMO, depois ENCERRADO
     status_ordem = {"AO_VIVO": 0, "PROXIMO": 1, "ENCERRADO": 2}
@@ -1438,20 +1447,23 @@ def calcular_sinais_ia(usar_gemini: bool = False,
     hoje_iso = date.today().isoformat()
 
     # ========== PURGE AUTOMÁTICO SE DATA MUDOU ==========
-    cache_key_dia = "ia_sinais_cache_data_ref_v1"
+    # VERSÃO DO CACHE INCREMENTADA v39: força invalidação GLOBAL de qualquer cache
+    # antigo (SHA 392a217 / 8953e35) nos ambientes Uvicorn long-running (Render).
+    _CACHE_VERSION_SALT = "v39-ZERO-SEED-MOCKS-STRICT-20260820"
+    cache_key_dia = f"ia_sinais_cache_data_ref_{_CACHE_VERSION_SALT}"
     dia_cacheado = _cache_get_ttl(cache_key_dia)
     if dia_cacheado is not None and str(dia_cacheado) != hoje_iso:
-        # Apaga TODOS caches antigos de IA sinais (ontem e anteriores)
+        # Apaga TODOS caches antigos de IA sinais (ontem e anteriores) + qualquer versão anterior
         try:
-            # _CACHE é o dicionario principal (dict[str, dict{ts,dado}])
             for k in list(_CACHE.keys()):
-                if k.startswith("ia_sinais_main_v2_"):
+                if k.startswith("ia_sinais_main_v") or k.startswith("ia_sinais_cache_data_ref_"):
                     _CACHE.pop(k, None)
         except Exception:
             pass
     _cache_set_ttl(cache_key_dia, hoje_iso, 86400)  # cache valido por 24h para este dia
 
-    cache_chave = f"ia_sinais_main_v2_{'gem' if usar_gemini else 'heur'}_{'today' if apenas_hoje_ou_live else 'all'}_{_dt.now().strftime('%Y%m%d%H%M')[:-1]}"
+    # Cache key com salt de versão (NÃO é compatível com builds velhos)
+    cache_chave = f"ia_sinais_main_v2_{_CACHE_VERSION_SALT}_{'gem' if usar_gemini else 'heur'}_{'today' if apenas_hoje_ou_live else 'all'}_{_dt.now().strftime('%Y%m%d%H%M')[:-1]}"
     cache_existente = _cache_get_ttl(cache_chave)
     if cache_existente is not None:
         return cache_existente
@@ -1687,6 +1699,28 @@ def calcular_sinais_ia(usar_gemini: bool = False,
             # fallback silencioso, mantém heurística
             pass
 
+    # ============================================================
+    # CAMADA FINAL DE GARANTIA: PURGA QUALQUER SEED REMANESCENTE
+    # Aplica filtro anti-mock NO OUTPUT FINAL (após heurística, após Gemini).
+    # Mesmo se todas as camadas acima falharem (cache velho + filtro faltante),
+    # esta linha GARANTE que NENHUM dos 8 confrontos seed congelados passe.
+    # ============================================================
+    _FINAL_SEED_PAIRS: tuple = (
+        ("newcastle", "atalanta"), ("arsenal", "roma"), ("atalanta", "lyon"),
+        ("sport", "goiás"), ("sport", "goias"), ("atalanta", "arsenal"),
+        ("manchester united", "newcastle"), ("az alkmaar", "newcastle"),
+        ("parma", "atalanta"), ("atalanta", "betis"),
+    )
+    def _output_nao_e_seed(s: Dict[str, Any]) -> bool:
+        t = s.get("teams") if isinstance(s.get("teams"), dict) else {}
+        h_raw = str(((t.get("home") or {}).get("name") if isinstance(t.get("home"), dict) else s.get("home") or "")).lower()
+        a_raw = str(((t.get("away") or {}).get("name") if isinstance(t.get("away"), dict) else s.get("away") or "")).lower()
+        for (s1, s2) in _FINAL_SEED_PAIRS:
+            if (s1 in h_raw and s2 in a_raw) or (s2 in h_raw and s1 in a_raw):
+                return False
+        return True
+    sinais = [s for s in sinais if isinstance(s, dict) and _output_nao_e_seed(s)]
+
     _cache_set_ttl(cache_chave, sinais, 90)
     return sinais
 
@@ -1758,6 +1792,16 @@ def _map_v3_flat_to_v1_fixture_shape(v3_jogos_flat: List[Dict[str, Any]]) -> Lis
 
 
 def _fs_mock_all_games_for_signals() -> List[Dict[str, Any]]:
+    """Fallback de último recurso (legado). STRICT: NÃO retorna nada se ALLOW_MOCK != 1.
+
+       Evita que qualquer fluxo inesperado popule a UI com os 8 confrontos fixos antigos
+       (Palmeiras×Fluminense, Liverpool×Arsenal etc) que apareciam congelados no tick 02.
+    """
+    import os as _os_env_strict
+    allow_mock = (_os_env_strict.getenv("ALLOW_SINAIS_FALLBACK_MOCK", "0").strip().lower()
+                  in ("1", "true", "sim", "yes", "s"))
+    if not allow_mock:
+        return []
     lista: List[Dict[str, Any]] = []
     data = datetime.now().strftime("%Y-%m-%d")
     confrontos = [

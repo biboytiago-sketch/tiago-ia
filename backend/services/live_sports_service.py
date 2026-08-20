@@ -1201,13 +1201,20 @@ def obter_jogos_ao_vivo() -> List[Dict[str, Any]]:
             return saida
 
     # ------------------------------------------------------------------
-    # 3) Fallback IA DO TIAGO (última camada)
+    # 3) Fallback IA DO TIAGO (última camada) — STRICT v39 se ALLOW_MOCK != 1
     # ------------------------------------------------------------------
-    fb = [_compat({**j, "assinatura": _SIGNATURE_IA_DO_TIAGO,
-                    "origem_dados": j.get("origem_dados") or "IA_DO_TIAGO_DINAMICO"})
-          for j in _fallback_live()]
-    _cache_set(cache_key, fb, _CACHE_TTL_LIVE)
-    return fb
+    import os as _os_live_fb
+    _allow_live = (_os_live_fb.getenv("ALLOW_SINAIS_FALLBACK_MOCK", "0").strip().lower()
+                   in ("1", "true", "sim", "yes", "s"))
+    if _allow_live:
+        fb = [_compat({**j, "assinatura": _SIGNATURE_IA_DO_TIAGO,
+                        "origem_dados": j.get("origem_dados") or "IA_DO_TIAGO_DINAMICO"})
+              for j in _fallback_live()]
+        _cache_set(cache_key, fb, _CACHE_TTL_LIVE)
+        return fb
+    # STRICT: retorna vazio (UI mostra empty state limpo)
+    _cache_set(cache_key, [], max(10.0, _CACHE_TTL_LIVE / 4.0))
+    return []
 
 
 def _obter_estatisticas_partida(fixture_id: int, ttl: float = _CACHE_TTL_LIVE) -> Dict[str, Any]:
@@ -1376,10 +1383,20 @@ def obter_jogos_por_data(data_ref: datetime, status: str = "NS") -> List[Dict[st
             return saida
 
     # 3) Fallback IA
-    fb = [_compat({**j, "assinatura": _SIGNATURE_IA_DO_TIAGO})
-          for j in _fallback_data(data_ref)]
-    _cache_set(cache_key, fb, _CACHE_TTL_STATIC)
-    return fb
+    # STRICT MODE 2026-08-20 v39: NÃO usa _fallback_data (seed dinâmico) se a flag
+    # ALLOW_SINAIS_FALLBACK_MOCK não for explicitamente 1. Retorna lista vazia para
+    # que a UI mostre o Empty State de "Nenhum jogo ao vivo no momento" ao invés
+    # de qualquer combinação seed que acabe sendo os mesmos 8 confrontos congelados.
+    import os as _os_fb
+    _allow = (_os_fb.getenv("ALLOW_SINAIS_FALLBACK_MOCK", "0").strip().lower()
+              in ("1", "true", "sim", "yes", "s"))
+    if _allow:
+        fb = [_compat({**j, "assinatura": _SIGNATURE_IA_DO_TIAGO})
+              for j in _fallback_data(data_ref)]
+        _cache_set(cache_key, fb, _CACHE_TTL_STATIC)
+        return fb
+    _cache_set(cache_key, [], _CACHE_TTL_STATIC // 2)  # cacheta vazio por 30s, tenta de novo logo
+    return []
 
 
 def obter_jogos_hoje() -> List[Dict[str, Any]]:

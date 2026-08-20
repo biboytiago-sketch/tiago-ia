@@ -2,7 +2,7 @@ FROM python:3.11-slim
 
 LABEL maintainer="Tiago IA Backend v3.5"
 LABEL description="Live Sports Unified Fetcher + IA do Tiago. Docker mode, usado no Render tiago-ia-1."
-LABEL build.hash_forcado_clear_cache="2026-08-20-v39-CRITICAL-PURGE-CACHE-V3-LIVE-PRIMEIRO-0-MOCKS-STRICT-EMPTY-STATE-DART-FLUTTER-SHARED-PREFS-FORCE-REFRESH-60S"
+LABEL build.hash_forcado_clear_cache="2026-08-20-v40-CRITICAL-CACHE-INVALIDATION-STRICT-LIVE-SPORTS-ALLOW-MOCK-0-REQUIRED-OUTPUT-FINAL-ANTISEED-GLOBAL-GUARANTEE"
 
 # =======================================================================
 # HARDCODED NO-DOCKERFILE-STRICT: evita que cache de build do Render use
