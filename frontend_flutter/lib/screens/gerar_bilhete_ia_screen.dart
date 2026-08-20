@@ -94,15 +94,14 @@ class _GerarBilheteIAScreenState extends State<GerarBilheteIAScreen>
     });
     try {
       final String base = await _resolverBackend();
-      final Uri uri =
-          Uri.parse('$base/api/v3/sports/gerar-bilhetes-ia')
-              .replace(queryParameters: <String, String>{
+      final Uri uri = Uri.parse('$base/api/v3/sports/gerar-bilhetes-ia')
+          .replace(queryParameters: <String, String>{
         'quantidade_bilhetes': '3',
         'jogos_minimo': '2',
         'jogos_maximo': '6',
       });
-      final http.Response r =
-          await http.get(uri).timeout(const Duration(seconds: 20));
+      final http.Response r = await http.get(uri).timeout(
+          const Duration(seconds: 45)); // 🟢 antes 20s (Render pode cold start)
       if (r.statusCode != 200)
         throw Exception(
             'HTTP ${r.statusCode}: ${r.body.substring(0, r.body.length.clamp(0, 120))}');
@@ -210,7 +209,8 @@ class _GerarBilheteIAScreenState extends State<GerarBilheteIAScreen>
             body: jsonEncode(
                 <String, dynamic>{'selecoes': usadas, 'stake_total': 100.0}),
           )
-          .timeout(const Duration(seconds: 15));
+          .timeout(const Duration(
+              seconds: 45)); // 🟢 antes 15s (validacao multipla pode chamar IA)
       if (r.statusCode != 200) throw Exception('HTTP ${r.statusCode}');
       final Map<String, dynamic> valid =
           BackendConfig.safeMap(jsonDecode(r.body));

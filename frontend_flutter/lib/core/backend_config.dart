@@ -67,13 +67,14 @@ class BackendConfig {
 
   // ============================================================
   // MODO DEFAULT (compatibilidade com código antigo):
-  // Usa IP hardcoded atual como BASE ESTÁTICA, mas as telas novas
-  // devem chamar ApiService.resolveBaseUrl() para fallback automático.
+  // 💡 USA RENDER NUVEM COMO DEFAULT (NAO MAIS IP LOCAL).
+  //    Se o usuario estiver em 5G / 4G / rede externa: RENDER funciona.
+  //    Se estiver no Wi-Fi do PC: as telas que usam resolveV3() testam LAN.
   // ============================================================
   static const String _ipLocal = '192.168.1.42';
   static const String _baseLocal = 'http://$_ipLocal:$_porta';
   static const String _base =
-      _baseLocal; // padrão estático para telas que não usam resolução automática
+      _baseRender; // 🟢 MUDANCA CRITICA: DEFAULT = RENDER (nuvem), nao mais IP LAN!
 
   static const String baseRoot = _base;
   static const String baseV1 = '$_base/api/v1';

@@ -2294,7 +2294,8 @@ class ApiService {
   // ── STEP 1 · API STATUS BADGE ────────────────────────────────
   static Future<Map<String, dynamic>> getSportsApiStatus({
     bool probe = true,
-    Duration timeout = const Duration(seconds: 20),
+    Duration timeout = const Duration(
+        seconds: 30), // 🟢 antes 20s (ping em 6 fontes pode demorar)
   }) async {
     try {
       final String v1 = await resolveV1();

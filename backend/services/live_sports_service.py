@@ -1407,11 +1407,96 @@ _LIGAS_REAIS_2025 = (
         "Strasbourg", "Le Havre", "Toulouse", "Montpellier", "Angers",
         "Nantes", "Saint-Étienne", "Metz",
     )),
+    # 🟢 NOVAS LIGAS ADICIONADAS (estilo SportBet — cobertura global completa):
+    ("Brasileirão Série B 2025", "Brazil", "🇧🇷", (
+        "Sport Recife", "Náutico", "Guarani", "Ponte Preta", "Chapecoense",
+        "Avaí", "CSA", "CRB", "Ituano", "Sampaio Corrêa",
+        "Botafogo SP", "Brusque", "Criciúma", "Operário PR", "Mirassol",
+        "Novorizontino", "Paysandu", "Tombense", "Vila Nova", "Amazonas",
+    )),
+    ("Copa Libertadores 2026", "South America", "🏆", (
+        "Flamengo", "Palmeiras", "Atlético MG", "Grêmio", "São Paulo",
+        "Fluminense", "Corinthians", "Botafogo", "Fortaleza", "Internacional",
+        "Red Bull Bragantino", "Cruzeiro", "Boca Juniors", "River Plate",
+        "Racing Club", "Independiente", "Estudiantes LP", "Rosario Central",
+        "Cerro Porteño", "Olimpia PAR", "Libertad PAR", "Guaraní PAR",
+        "Nacional URU", "Peñarol", "Defensor Sporting", "Liverpool URU",
+        "Universidad Católica CHI", "Colo Colo", "Palestino", "Coquimbo Unido",
+        "Universidad de Chile", "Platense ARG", "Talleres", "Lanús",
+    )),
+    ("Copa Sudamericana 2026", "South America", "🥈", (
+        "Santos", "Bahia", "Cuiabá", "Goiás", "Ceará", "Vitória",
+        "Vasco da Gama", "Atlético GO", "Coritiba", "Athletico PR",
+        "Defensa y Justicia", "Belgrano", "Huracán", "Colón",
+        "Banfield", "Gimnasia LP", "Atlético Tucumán",
+        "LDU Quito", "Barcelona SC", "Emelec", "Independiente del Valle",
+        "Atlético Nacional COL", "Millonarios COL", "Junior Barranquilla",
+        "América de Cali", "Santa Fe COL",
+    )),
+    ("UEFA Champions League 25/26 · Fase Grupos", "Europe", "🏆", (
+        "Real Madrid", "Man. City", "Bayern Munique", "PSG", "Barcelona",
+        "Liverpool", "Arsenal", "Inter de Milão", "Dortmund", "Juventus",
+        "Milan", "Atlético Madrid", "Napoli", "Man. United", "Chelsea",
+        "RB Leipzig", "Club Brugge", "Feyenoord", "Celtic", "Benfica",
+        "FC Porto", "Sporting CP", "Rangers", "SC Braga", "Aston Villa",
+    )),
+    ("UEFA Europa League 25/26", "Europe", "🥈", (
+        "Roma", "Lazio", "Fiorentina", "Atalanta", "Torino",
+        "Sevilla", "Villarreal", "Real Sociedad", "Betis",
+        "Marseille", "Lyon", "Rennes", "Nice",
+        "Ajax", "PSV Eindhoven", "AZ Alkmaar", "Feyenoord",
+        "Benfica", "Braga", "Sporting CP",
+        "West Ham", "Chelsea", "Tottenham", "Newcastle",
+    )),
+    ("Eredivisie 25/26", "Netherlands", "🇳🇱", (
+        "PSV Eindhoven", "AFC Ajax", "Feyenoord", "AZ Alkmaar", "FC Twente",
+        "FC Utrecht", "Fortuna Sittard", "SC Heerenveen", "Sparta Rotterdam",
+        "Go Ahead Eagles", "NEC Nijmegen", "Excelsior", "Heracles Almelo",
+        "PEC Zwolle", "Vitesse Arnhem", "SC Cambuur", "FC Groningen",
+    )),
+    ("Liga Portugal Betclic 25/26", "Portugal", "🇵🇹", (
+        "Benfica", "FC Porto", "Sporting CP", "SC Braga", "Vitória SC",
+        "Boavista FC", "Estoril Praia", "GD Chaves", "Moreirense FC", "Rio Ave",
+        "FC Arouca", "Gil Vicente", "Famalicão", "Casa Pia AC", "Portimonense",
+        "Vitória Setúbal", "Marítimo", "CD Nacional Madeira",
+    )),
+    ("Major League Soccer (MLS) 2026", "USA", "🇺🇸", (
+        "Inter Miami CF", "LA Galaxy", "LAFC", "Seattle Sounders", "Atlanta United",
+        "NYCFC", "Columbus Crew", "Philadelphia Union", "FC Cincinnati",
+        "Orlando City SC", "Nashville SC", "New England Revolution",
+        "Austin FC", "FC Dallas", "Sporting Kansas City", "St. Louis CITY SC",
+        "Minnesota United", "Houston Dynamo FC", "Real Salt Lake", "Colorado Rapids",
+        "Toronto FC", "Vancouver Whitecaps", "CF Montréal", "Chicago Fire FC",
+    )),
+    ("Liga Profesional Argentina 2026", "Argentina", "🇦🇷", (
+        "Boca Juniors", "River Plate", "Racing Club", "Independiente", "San Lorenzo",
+        "Estudiantes LP", "Rosario Central", "Gimnasia LP", "Talleres CBA",
+        "Lanús", "Banfield", "Defensa y Justicia", "Belgrano CBA",
+        "Huracán", "Vélez Sarsfield", "Atlético Tucumán", "Colón Santa Fe",
+        "Unión SF", "Godoy Cruz", "Tigre", "Newells Old Boys", "Argentinos Jrs",
+    )),
+    ("Saudi Pro League 25/26", "Saudi Arabia", "🇸🇦", (
+        "Al-Hilal SFC", "Al-Nassr FC", "Al-Ittihad Club", "Al-Ahli Saudi", "Al-Shabab",
+        "Al-Taawoun", "Al-Fateh SC", "Damac FC", "Al-Fayha FC", "Al-Ettifaq",
+        "Al-Riyadh SC", "Al-Okhdood Club", "Abha Club", "Al-Wehda Club", "Al-Tai FC",
+        "Al-Raed FC", "Al-Faisaly", "Al-Khaleej FC",
+    )),
+    ("Süper Lig Türkiye 25/26", "Turkey", "🇹🇷", (
+        "Galatasaray AŞ", "Fenerbahçe SK", "Beşiktaş JK", "Trabzonspor AŞ",
+        "İstanbul Başakşehir", "Sivasspor", "Konyaspor KÜM", "Alanyaspor",
+        "Antalyaspor", "Kayserispor", "Gaziantep FK", "Adana Demirspor",
+        "Samsunspor", "Çaykur Rizespor", "Hatayspor", "MKE Ankaragücü",
+        "Kasımpaşa SK", "Pendikspor",
+    )),
 )
 
 _HORARIOS_FUTUROS_BR = (
-    "11:00", "12:30", "14:00", "16:00", "16:30", "17:00", "18:30",
-    "19:00", "19:30", "20:00", "20:30", "21:00", "21:30", "22:00",
+    "08:30", "09:00", "10:00", "10:30", "11:00", "11:30",
+    "12:00", "12:30", "13:00", "13:30", "14:00", "14:30",
+    "15:00", "15:30", "16:00", "16:15", "16:30", "17:00",
+    "17:30", "18:00", "18:30", "19:00", "19:15", "19:30",
+    "20:00", "20:30", "21:00", "21:30", "22:00", "22:30",
+    "23:00", "23:30",
 )
 
 _HORARIOS_LIVE_AO_VIVO = ("1H", "HT", "2H")
@@ -1532,7 +1617,7 @@ def _montar_partidas_da_data(data_ref: datetime, n_ao_vivo: int = 0) -> List[Dic
         times_lst = list(times)
         rng_data.shuffle(times_lst)
         # 2 a 3 partidas por liga (dia não terá todos os times!)
-        n_partidas_liga = rng_data.randint(2, 3)
+        n_partidas_liga = rng_data.randint(4, 6)  # 🟢 antes 2-3: mais jogos por liga (estilo SportBet)
         usados_no_dia: set = set()
         for _ in range(n_partidas_liga):
             if len(times_lst) < 2:

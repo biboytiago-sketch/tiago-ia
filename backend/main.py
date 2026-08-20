@@ -2298,7 +2298,11 @@ def nb_v3_sports_live():
         "aba": "AO_VIVO",
         "origem_dados_geral": _lsv_origem_geral(jogos),
         "total": len(jogos),
+        # 4 arrays FALLBACK: qualquer tela leia qualquer nome, vai encontrar a lista.
         "jogos": jogos,
+        "partidas": jogos,
+        "data_array": jogos,
+        "data": jogos,
     }
 
 
@@ -2312,7 +2316,11 @@ def nb_v3_sports_hoje():
         "aba": "HOJE",
         "origem_dados_geral": _lsv_origem_geral(jogos),
         "total": len(jogos),
+        # 4 arrays FALLBACK: qualquer tela leia qualquer nome, vai encontrar a lista.
         "jogos": jogos,
+        "partidas": jogos,
+        "data_array": jogos,
+        "data": jogos,
     }
 
 
@@ -2326,7 +2334,11 @@ def nb_v3_sports_amanha():
         "aba": "AMANHA",
         "origem_dados_geral": _lsv_origem_geral(jogos),
         "total": len(jogos),
+        # 4 arrays FALLBACK: qualquer tela leia qualquer nome, vai encontrar a lista.
         "jogos": jogos,
+        "partidas": jogos,
+        "data_array": jogos,
+        "data": jogos,
     }
 
 
@@ -2334,13 +2346,17 @@ def nb_v3_sports_amanha():
 @app.get("/api/v3/sports/fim-de-semana", tags=["sports-v3"])
 def nb_v3_sports_fds():
     """🗓️ Fim de Semana · sábado + domingo + segunda (3 dias)."""
-    jogos = _lsv_fds()
+    jogos = _aplicar_flat_fields_flutter(_lsv_fds())
     return {
         "assinatura": _SIG_V3,
         "aba": "FIM_DE_SEMANA",
         "origem_dados_geral": _lsv_origem_geral(jogos),
         "total": len(jogos),
+        # 4 arrays FALLBACK: qualquer tela leia qualquer nome, vai encontrar a lista.
         "jogos": jogos,
+        "partidas": jogos,
+        "data_array": jogos,
+        "data": jogos,
     }
 
 
