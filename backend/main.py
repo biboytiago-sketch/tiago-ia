@@ -471,20 +471,51 @@ def ping_check():
     return "pong"
 
 
+@app.get("/debug/routes-v34", tags=["debug"])
+def debug_routes_v34():
+    """
+    ENDPOINT DE EMERGENCIA: retorna todas as rotas registradas no FastAPI
+    e confirma EXATAMENTE se /api/v1/sports/api-status e /api/v3/sports/api-status
+    estao realmente na lista de rotas do app (nao apenas no codigo fonte).
+    """
+    rotas_raw = getattr(app, "routes", [])
+    paths = []
+    for r in rotas_raw:
+        p = getattr(r, "path", None)
+        if p:
+            paths.append(p)
+    paths_unicos = sorted(set(paths))
+    tem_v1 = "/api/v1/sports/api-status" in paths_unicos
+    tem_v3 = "/api/v3/sports/api-status" in paths_unicos
+    tem_ping = "/ping" in paths_unicos
+    tem_today = "/api/v1/sports/today" in paths_unicos
+    tem_debug = "/debug/routes-v34" in paths_unicos
+    return {
+        "ok": True,
+        "assinatura": "Debug Rotas v3.4",
+        "total_rotas_registradas": len(paths_unicos),
+        "checks": {
+            "tem_ping": tem_ping,
+            "tem_today_sports_v1": tem_today,
+            "tem_api_status_v1": tem_v1,
+            "tem_api_status_v3": tem_v3,
+            "tem_debug_routes_v34": tem_debug,
+        },
+        "rotas_contendo_status": [p for p in paths_unicos if "api-status" in p],
+        "rotas_primeiras_20": paths_unicos[:20],
+        "rotas_ultimas_20": paths_unicos[-20:],
+    }
+
+
 # ═══════════════════════════════════════════════════════════════════
 # STEP 1 · API STATUS BADGE (para dashboard UI Flutter)
 #   Obs.: DEVE vir SEMPRE DEPOIS da funcao _lsv_check_fontes_status()
 #         (ordem de declaracao Python importa: NameError no startup
 #         causava 404 nos endpoints seguintes).
+#   Obs2.: DUAS FUNCOES SEPARADAS (NAO empilhadas) para evitar qualquer
+#          bug de versao antiga FastAPI com decorators duplicados.
 # ═══════════════════════════════════════════════════════════════════
-@app.get("/api/v1/sports/api-status", tags=["sports-v1", "status-badge"])
-@app.get("/api/v3/sports/api-status", tags=["sports-v3", "status-badge"])
-def sports_api_status(probe: bool = True):
-    """
-    Retorna status consolidado de TODAS as 6 fontes + fallback IA.
-    Usado pelo API Status Badge na tela inicial do Flutter.
-    Query param opcional: probe (bool, default True) -> faz probe HTTP real em cada fonte.
-    """
+def _status_payload(probe: bool = True):
     probe_bool = bool(probe) if isinstance(probe, bool) else True
     try:
         status_fontes = _lsv_check_fontes_status(live_probe=probe_bool)
@@ -498,7 +529,6 @@ def sports_api_status(probe: bool = True):
             "total_fontes": 6,
             "erro_checagem": str(e)[:200],
         }
-    # Anexa verificacao de env vars do startup (mascara todas as chaves — NAO EXPOE secrets)
     env_check = getattr(app.state, "env_vars_check", {
         "chaves_ok": 0, "chaves_faltando": 99,
         "detalhes": [], "erro": "startup_check_nao_executou",
@@ -516,6 +546,16 @@ def sports_api_status(probe: bool = True):
         "env_vars_check": env_check,
         "cache_ttl_segundos": 15 if probe_bool else 300,
     }
+
+
+@app.get("/api/v1/sports/api-status", tags=["sports-v1", "status-badge"])
+def sports_api_status_v1(probe: bool = True):
+    return _status_payload(probe=probe)
+
+
+@app.get("/api/v3/sports/api-status", tags=["sports-v3", "status-badge"])
+def sports_api_status_v3(probe: bool = True):
+    return _status_payload(probe=probe)
 
 
 class LoginRequest(BaseModel):
