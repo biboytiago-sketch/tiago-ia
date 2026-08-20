@@ -2,7 +2,7 @@ FROM python:3.11-slim
 
 LABEL maintainer="Tiago IA Backend v3.4"
 LABEL description="Live Sports Unified Fetcher + IA do Tiago. Docker mode, usado no Render tiago-ia-1."
-LABEL build.hash_forcado_clear_cache="2026-08-19-v34-api-status-fix-8302354-NAO-PODE-USAR-CACHE-ANTIGO-JAMAIS"
+LABEL build.hash_forcado_clear_cache="2026-08-19-v34-api-status-fix-0eea7ba-NAO-PODE-USAR-CACHE-ANTIGO-JAMAIS-fix-port-env-sh-c"
 
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
@@ -21,5 +21,7 @@ COPY backend/ /app/
 
 EXPOSE 8000
 
-# 4. Startup final: uvicorn direto, respeita porta $PORT do Render
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "${PORT:-8000}", "--workers", "1", "--proxy-headers", "--forwarded-allow-ips", "*"]
+# 4. Startup FINAL usando shell form (sh -c) para EXPANDIR $PORT corretamente.
+#    Render injeta PORT=10000 em runtime; caindo para 8000 se estiver vazio (localhost).
+#    OBS: NAO usar CMD ["array", "json"] aqui pq ele NAO expande variaveis de ambiente!
+CMD sh -c "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1 --proxy-headers --forwarded-allow-ips '*'"
