@@ -479,23 +479,13 @@ def ping_check():
 # ═══════════════════════════════════════════════════════════════════
 @app.get("/api/v1/sports/api-status", tags=["sports-v1", "status-badge"])
 @app.get("/api/v3/sports/api-status", tags=["sports-v3", "status-badge"])
-def sports_api_status(
-    probe: bool = Query(True, description="Faz probe HTTP real em cada fonte (4s timeout cada)"),
-):
+def sports_api_status(probe: bool = True):
     """
     Retorna status consolidado de TODAS as 6 fontes + fallback IA.
-    Usado pelo **API Status Badge** na tela inicial do Flutter.
-
-    Resposta inclui:
-      - status_geral: EXCELENTE / BOM / REDUZIDO / SOMENTE_FALLBACK
-      - fontes_online, fontes_chave_ok, total_fontes
-      - lista detalhada: chave_configurada, probe_online, latencia_ms, qtd_jogos_recente, ultimo_erro
-      - env_vars_check (resultado da verificacao no startup, com chaves MASCARADAS)
+    Usado pelo API Status Badge na tela inicial do Flutter.
+    Query param opcional: probe (bool, default True) -> faz probe HTTP real em cada fonte.
     """
-    try:
-        probe_bool = bool(probe)
-    except Exception:
-        probe_bool = True
+    probe_bool = bool(probe) if isinstance(probe, bool) else True
     try:
         status_fontes = _lsv_check_fontes_status(live_probe=probe_bool)
     except Exception as e:
