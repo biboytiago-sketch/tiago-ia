@@ -781,6 +781,9 @@ def _aplicar_flat_fields_flutter(jogos: List[Dict[str, Any]]) -> List[Dict[str, 
                 data_fixture = fixture_obj.get("time")
         hr_full = str(
             nj.get("hr") or nj.get("horario") or nj.get("kickoff") or nj.get("time")
+            or nj.get("horario_br") or nj.get("horario_local") or nj.get("hora")
+            or nj.get("hora_br") or nj.get("hora_inicio") or nj.get("horario_inicio")
+            or nj.get("horario_partida") or nj.get("hr_jogo") or nj.get("hr_partida")
             or (data_fixture[11:16] if isinstance(data_fixture, str) and len(data_fixture) >= 16 else None)
             or (data_fixture[0:5] if isinstance(data_fixture, str) and len(data_fixture) >= 5 and ":" in data_fixture else None)
             or "--:--"
