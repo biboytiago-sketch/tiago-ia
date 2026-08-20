@@ -290,6 +290,160 @@ def startup_event():
         print(f"Erro ao inicializar banco: {e}")
 
 
+# ═══════════════════════════════════════════════════════════════════
+# STEP 0 · Helper que verifica status das fontes (usado pelo badge UI)
+#   Obs.: antes essa funcao estava em modulo separado / nao existia,
+#         causava NameError no startup (registro de /api-status quebrava
+#         e arrastava consigo os endpoints seguintes /api/v1/matches etc).
+#         Mantemos inline aqui, zero dependencia externa.
+# ═══════════════════════════════════════════════════════════════════
+def _lsv_check_fontes_status(live_probe: bool = True) -> Dict[str, Any]:
+    """
+    Verifica configuracao + probe HTTP (se live_probe=True) das 6 fontes:
+      F1 FlashLive (Rapid) / F2 FreeAPI (Rapid) / F3 API-Football Rapid
+      F4 Football-Pro Rapid     / F5 API-Football DIRETO / F6 Football-Data.org
+    + fallback IA dinamica (sempre ativa como ultima camada).
+
+    Retorna dict no formato esperado por sports_api_status() endpoint.
+    """
+    try:
+        import httpx as _httpx
+    except Exception:
+        _httpx = None
+
+    fontes_meta: List[Dict[str, Any]] = [
+        {"idx": 1, "nome": "FlashLive",       "key_env": "RAPIDAPI_KEY",                    "host_env": "RAPIDAPI_HOST_FLASHLIVE",           "url_probe": None,
+         "tipo": "RapidAPI · FlashLive",       "label_curto": "F1 · FlashLive"},
+        {"idx": 2, "nome": "FreeAPI",         "key_env": "RAPIDAPI_KEY",                    "host_env": "RAPIDAPI_HOST_FREEAPI",             "url_probe": None,
+         "tipo": "RapidAPI · FreeAPI",         "label_curto": "F2 · FreeAPI"},
+        {"idx": 3, "nome": "API-Football",    "key_env": "RAPIDAPI_KEY",                    "host_env": "RAPIDAPI_HOST_LEGACY",              "url_probe": None,
+         "tipo": "RapidAPI · API-Football",    "label_curto": "F3 · API-Foot Rapid"},
+        {"idx": 4, "nome": "Football-Pro",    "key_env": "RAPIDAPI_KEY",                    "host_env": "RAPIDAPI_HOST_FOOTBALL_PRO",        "url_probe": None,
+         "tipo": "RapidAPI · Football-Pro",    "label_curto": "F4 · Football-Pro Rapid"},
+        {"idx": 5, "nome": "API-Football Dir","key_env": "API_FOOTBALL_KEY",                 "host_env": None,                                "url_probe": "https://api-football-v1.p.rapidapi.com/v3/timezone",
+         "tipo": "API-Football DIRETO",        "label_curto": "F5 · API-Foot Direto"},
+        {"idx": 6, "nome": "Football-Data",   "key_env": "FOOTBALL_DATA_ORG_KEY",            "host_env": None,                                "url_probe": "https://api.football-data.org/v4/competitions",
+         "tipo": "Football-Data.org",          "label_curto": "F6 · Football-Data.org"},
+    ]
+
+    fontes_status: List[Dict[str, Any]] = []
+    fontes_online: int = 0
+    fontes_chave_ok: int = 0
+
+    for f in fontes_meta:
+        chave_raw = (os.getenv(f["key_env"]) or "").strip()
+        is_placeholder = (not chave_raw) or any(p in chave_raw.lower() for p in ("sua_chave", "your_key", "xxx", "<", "cole_aqui", "aqui"))
+        chave_configurada = bool(chave_raw) and not is_placeholder
+        if chave_configurada:
+            fontes_chave_ok += 1
+        host = (os.getenv(f["host_env"]) or "").strip() if f["host_env"] else ""
+        probe_online: Optional[bool] = None
+        latencia_ms: Optional[int] = None
+        qtd_jogos_recente: int = 0
+        ultimo_erro: Optional[str] = None
+
+        if live_probe and chave_configurada and _httpx is not None:
+            try:
+                headers: Dict[str, str] = {}
+                url = f["url_probe"]
+                if "RAPIDAPI" in f["key_env"] or "Rapid" in f["tipo"]:
+                    # Fontes 1..4 = Rapid. Preferimos probe no /ping ou /fixtures? Vamos probe /timezone (leve) se host definido.
+                    if host:
+                        url = f"https://{host}/v3/timezone"
+                    headers = {
+                        "x-rapidapi-key": chave_raw,
+                        "x-rapidapi-host": host or "flashlive-sports.p.rapidapi.com",
+                    }
+                elif f["idx"] == 5:
+                    # F5 API-Football DIRETO (usa a mesma chave como apikey query)
+                    url = "https://v3.football.api-sports.io/timezone"
+                    headers = {"x-apisports-key": chave_raw}
+                elif f["idx"] == 6:
+                    # F6 Football-Data.org (usa chave como X-Auth-Token)
+                    url = "https://api.football-data.org/v4/competitions"
+                    headers = {"X-Auth-Token": chave_raw}
+
+                import time as _t
+                t0 = _t.perf_counter()
+                if url:
+                    with _httpx.Client(timeout=4.0, follow_redirects=True) as cli:
+                        resp = cli.get(url, headers=headers or None)
+                    lat_ms = int((_t.perf_counter() - t0) * 1000)
+                    latencia_ms = lat_ms
+                    if resp.status_code in (200, 403, 401, 429):
+                        # 200 = OK; 403/401 = plano nao pago mas CHAVE EXISTE (fonte online do ponto de vista de conectividade)
+                        # 429 = rate limitado mas servidor retornou (fonte online)
+                        probe_online = (resp.status_code == 200)
+                        if resp.status_code == 403:
+                            ultimo_erro = "HTTP 403 (plano Rapid nao pago / nao inscrito, mas chave valida)"
+                        elif resp.status_code == 429:
+                            ultimo_erro = "HTTP 429 (rate limit da fonte, chave OK)"
+                        elif resp.status_code == 401:
+                            ultimo_erro = "HTTP 401 (chave invalida)"
+                    else:
+                        probe_online = False
+                        ultimo_erro = f"HTTP {resp.status_code}"
+                else:
+                    probe_online = None
+            except Exception as e_probe:
+                probe_online = False
+                ultimo_erro = f"Exception: {str(e_probe)[:120]}"
+        else:
+            # Sem live probe: online = tem chave ok
+            probe_online = bool(chave_configurada) if live_probe is False else None
+
+        if probe_online:
+            fontes_online += 1
+
+        masc_chave = ""
+        if chave_raw and len(chave_raw) >= 10:
+            masc_chave = chave_raw[:4] + ("*" * max(0, len(chave_raw) - 8)) + chave_raw[-4:]
+        elif chave_raw:
+            masc_chave = "*" * len(chave_raw)
+
+        fontes_status.append({
+            "indice": f["idx"],
+            "nome": f["nome"],
+            "label_curto": f["label_curto"],
+            "tipo": f["tipo"],
+            "chave_configurada": chave_configurada,
+            "chave_env": f["key_env"],
+            "chave_mascarada": masc_chave,
+            "host_env": f["host_env"],
+            "host_valor": host if host else None,
+            "probe_online": probe_online,
+            "latencia_ms": latencia_ms,
+            "qtd_jogos_recente": qtd_jogos_recente,
+            "ultimo_erro": ultimo_erro,
+        })
+
+    # Determina status_geral
+    total_fontes = len(fontes_meta)
+    if fontes_online >= 5:
+        status_geral = "EXCELENTE"
+    elif fontes_online >= 3:
+        status_geral = "BOM"
+    elif fontes_online >= 1:
+        status_geral = "REDUZIDO"
+    else:
+        status_geral = "SOMENTE_FALLBACK"
+
+    return {
+        "assinatura": "IA do Tiago · Live Sports V3.4 · Unified",
+        "status_geral": status_geral,
+        "fontes": fontes_status,
+        "fallback": {
+            "ativa": True,
+            "label": "IA do Tiago · Dinâmico por data",
+            "camadas": 7,
+            "descricao": "Ultima camada: seed dinamico + Gemini se chave configurada.",
+        },
+        "fontes_online": fontes_online,
+        "fontes_chave_ok": fontes_chave_ok,
+        "total_fontes": total_fontes,
+    }
+
+
 @app.get("/", tags=["health"])
 def root_health():
     return {
@@ -319,6 +473,9 @@ def ping_check():
 
 # ═══════════════════════════════════════════════════════════════════
 # STEP 1 · API STATUS BADGE (para dashboard UI Flutter)
+#   Obs.: DEVE vir SEMPRE DEPOIS da funcao _lsv_check_fontes_status()
+#         (ordem de declaracao Python importa: NameError no startup
+#         causava 404 nos endpoints seguintes).
 # ═══════════════════════════════════════════════════════════════════
 @app.get("/api/v1/sports/api-status", tags=["sports-v1", "status-badge"])
 @app.get("/api/v3/sports/api-status", tags=["sports-v3", "status-badge"])
@@ -333,7 +490,7 @@ def sports_api_status(
       - status_geral: EXCELENTE / BOM / REDUZIDO / SOMENTE_FALLBACK
       - fontes_online, fontes_chave_ok, total_fontes
       - lista detalhada: chave_configurada, probe_online, latencia_ms, qtd_jogos_recente, ultimo_erro
-      - env_vars_check (resultado da verificação no startup, com chaves MASCARADAS)
+      - env_vars_check (resultado da verificacao no startup, com chaves MASCARADAS)
     """
     try:
         probe_bool = bool(probe)
@@ -351,7 +508,7 @@ def sports_api_status(
             "total_fontes": 6,
             "erro_checagem": str(e)[:200],
         }
-    # Anexa verificação de env vars do startup (mascara todas as chaves — NÃO EXPÕE secrets)
+    # Anexa verificacao de env vars do startup (mascara todas as chaves — NAO EXPOE secrets)
     env_check = getattr(app.state, "env_vars_check", {
         "chaves_ok": 0, "chaves_faltando": 99,
         "detalhes": [], "erro": "startup_check_nao_executou",
