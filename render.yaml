@@ -1,12 +1,12 @@
 services:
   - type: web
-    name: tiago-ia-backend
+    name: tiago-ia-1
     runtime: python
     region: sao-paulo
     plan: starter
-    buildCommand: "cd backend && pip install --no-cache-dir -r requirements.txt"
-    startCommand: "cd backend && uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1"
-    rootDir: ./
+    buildCommand: "pip install --no-cache-dir -r requirements.txt"
+    startCommand: "uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1"
+    rootDir: ./backend
     healthCheckPath: "/docs"
     autoDeploy: yes
     envVars:
