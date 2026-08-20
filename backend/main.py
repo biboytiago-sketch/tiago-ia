@@ -312,18 +312,24 @@ def _lsv_check_fontes_status(live_probe: bool = True) -> Dict[str, Any]:
         _httpx = None
 
     fontes_meta: List[Dict[str, Any]] = [
-        {"idx": 1, "nome": "FlashLive",       "key_env": "RAPIDAPI_KEY",                    "host_env": "RAPIDAPI_HOST_FLASHLIVE",           "url_probe": None,
-         "tipo": "RapidAPI · FlashLive",       "label_curto": "F1 · FlashLive"},
-        {"idx": 2, "nome": "FreeAPI",         "key_env": "RAPIDAPI_KEY",                    "host_env": "RAPIDAPI_HOST_FREEAPI",             "url_probe": None,
-         "tipo": "RapidAPI · FreeAPI",         "label_curto": "F2 · FreeAPI"},
-        {"idx": 3, "nome": "API-Football",    "key_env": "RAPIDAPI_KEY",                    "host_env": "RAPIDAPI_HOST_LEGACY",              "url_probe": None,
-         "tipo": "RapidAPI · API-Football",    "label_curto": "F3 · API-Foot Rapid"},
-        {"idx": 4, "nome": "Football-Pro",    "key_env": "RAPIDAPI_KEY",                    "host_env": "RAPIDAPI_HOST_FOOTBALL_PRO",        "url_probe": None,
-         "tipo": "RapidAPI · Football-Pro",    "label_curto": "F4 · Football-Pro Rapid"},
-        {"idx": 5, "nome": "API-Football Dir","key_env": "API_FOOTBALL_KEY",                 "host_env": None,                                "url_probe": "https://api-football-v1.p.rapidapi.com/v3/timezone",
-         "tipo": "API-Football DIRETO",        "label_curto": "F5 · API-Foot Direto"},
+        {"idx": 1, "nome": "FlashLive",       "key_env": "RAPIDAPI_KEY",                    "host_env": "RAPIDAPI_HOST_FLASHLIVE",           "url_probe": "v1/events/live?sport_id=1",
+         "tipo": "RapidAPI · FlashLive",       "label_curto": "F1 · FlashLive",
+         "use_host_prefix": True, "host_default": "flashlive-sports.p.rapidapi.com"},
+        {"idx": 2, "nome": "FreeAPI",         "key_env": "RAPIDAPI_KEY",                    "host_env": "RAPIDAPI_HOST_FREEAPI",             "url_probe": "football-matches-live",
+         "tipo": "RapidAPI · FreeAPI",         "label_curto": "F2 · FreeAPI",
+         "use_host_prefix": True, "host_default": "free-api-live-football-data.p.rapidapi.com"},
+        {"idx": 3, "nome": "API-Football",    "key_env": "RAPIDAPI_KEY",                    "host_env": "RAPIDAPI_HOST_LEGACY",              "url_probe": "v3/timezone",
+         "tipo": "RapidAPI · API-Football",    "label_curto": "F3 · API-Foot Rapid",
+         "use_host_prefix": True, "host_default": "api-football-v1.p.rapidapi.com"},
+        {"idx": 4, "nome": "Football-Pro",    "key_env": "RAPIDAPI_KEY",                    "host_env": "RAPIDAPI_HOST_FOOTBALL_PRO",        "url_probe": "v3/football/fixtures?date=" + datetime.utcnow().strftime("%Y-%m-%d"),
+         "tipo": "RapidAPI · Football-Pro",    "label_curto": "F4 · Football-Pro Rapid",
+         "use_host_prefix": True, "host_default": "football-pro.p.rapidapi.com"},
+        {"idx": 5, "nome": "API-Football Dir","key_env": "API_FOOTBALL_KEY",                 "host_env": None,                                "url_probe": "https://v3.football.api-sports.io/timezone",
+         "tipo": "API-Football DIRETO",        "label_curto": "F5 · API-Foot Direto",
+         "use_host_prefix": False, "host_default": None},
         {"idx": 6, "nome": "Football-Data",   "key_env": "FOOTBALL_DATA_ORG_KEY",            "host_env": None,                                "url_probe": "https://api.football-data.org/v4/competitions",
-         "tipo": "Football-Data.org",          "label_curto": "F6 · Football-Data.org"},
+         "tipo": "Football-Data.org",          "label_curto": "F6 · Football-Data.org",
+         "use_host_prefix": False, "host_default": None},
     ]
 
     fontes_status: List[Dict[str, Any]] = []
@@ -345,23 +351,38 @@ def _lsv_check_fontes_status(live_probe: bool = True) -> Dict[str, Any]:
         if live_probe and chave_configurada and _httpx is not None:
             try:
                 headers: Dict[str, str] = {}
-                url = f["url_probe"]
+                host = (os.getenv(f["host_env"]) or "").strip() if f["host_env"] else ""
+                url_raw: Any = f.get("url_probe")
+                use_prefix: bool = bool(f.get("use_host_prefix"))
+                host_default: Any = f.get("host_default")
+
+                # ===== Resolve URL FINAL =====
+                if isinstance(url_raw, str) and url_raw.startswith("http"):
+                    url = url_raw
+                elif isinstance(url_raw, str) and use_prefix:
+                    host_use = host or (host_default if isinstance(host_default, str) else "")
+                    url = f"https://{host_use}/{url_raw.lstrip('/')}" if host_use else None
+                else:
+                    url = None
+
                 if "RAPIDAPI" in f["key_env"] or "Rapid" in f["tipo"]:
-                    # Fontes 1..4 = Rapid. Preferimos probe no /ping ou /fixtures? Vamos probe /timezone (leve) se host definido.
-                    if host:
-                        url = f"https://{host}/v3/timezone"
+                    # Fontes 1..4 = RapidAPI. Header obrigatório.
+                    host_use = host or (host_default if isinstance(host_default, str) else "flashlive-sports.p.rapidapi.com")
                     headers = {
                         "x-rapidapi-key": chave_raw,
-                        "x-rapidapi-host": host or "flashlive-sports.p.rapidapi.com",
+                        "x-rapidapi-host": host_use,
+                        "accept": "application/json",
                     }
                 elif f["idx"] == 5:
-                    # F5 API-Football DIRETO (usa a mesma chave como apikey query)
-                    url = "https://v3.football.api-sports.io/timezone"
-                    headers = {"x-apisports-key": chave_raw}
+                    # F5 API-Football DIRETO (usa a mesma chave como apikey header)
+                    headers = {
+                        "x-apisports-key": chave_raw,
+                        "x-rapidapi-key": chave_raw,
+                        "accept": "application/json",
+                    }
                 elif f["idx"] == 6:
                     # F6 Football-Data.org (usa chave como X-Auth-Token)
-                    url = "https://api.football-data.org/v4/competitions"
-                    headers = {"X-Auth-Token": chave_raw}
+                    headers = {"X-Auth-Token": chave_raw, "accept": "application/json"}
 
                 import time as _t
                 t0 = _t.perf_counter()
@@ -370,16 +391,20 @@ def _lsv_check_fontes_status(live_probe: bool = True) -> Dict[str, Any]:
                         resp = cli.get(url, headers=headers or None)
                     lat_ms = int((_t.perf_counter() - t0) * 1000)
                     latencia_ms = lat_ms
-                    if resp.status_code in (200, 403, 401, 429):
-                        # 200 = OK; 403/401 = plano nao pago mas CHAVE EXISTE (fonte online do ponto de vista de conectividade)
+                    if resp.status_code in (200, 403, 401, 429, 204, 206):
+                        # 200 = OK; 204/206 = vazio/parcial mas servidor respondeu
+                        # 403 = plano nao pago mas CHAVE EXISTE (fonte online do ponto de vista de conectividade)
+                        # 401 = chave invalida mas servidor retornou (fonte alcancavel)
                         # 429 = rate limitado mas servidor retornou (fonte online)
-                        probe_online = (resp.status_code == 200)
+                        probe_online = (resp.status_code in (200, 204, 206, 403, 429))
                         if resp.status_code == 403:
                             ultimo_erro = "HTTP 403 (plano Rapid nao pago / nao inscrito, mas chave valida)"
                         elif resp.status_code == 429:
                             ultimo_erro = "HTTP 429 (rate limit da fonte, chave OK)"
                         elif resp.status_code == 401:
                             ultimo_erro = "HTTP 401 (chave invalida)"
+                        elif resp.status_code in (204, 206):
+                            ultimo_erro = f"HTTP {resp.status_code} (sem corpo mas servidor online)"
                     else:
                         probe_online = False
                         ultimo_erro = f"HTTP {resp.status_code}"

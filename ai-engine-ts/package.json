@@ -1,0 +1,32 @@
+{
+  "name": "tiago-ia-ai-engine-ts",
+  "version": "1.0.0",
+  "description": "Tiago IA · AI Advisor (Google Gemini) + Bet Ticket Builder. Integração TypeScript com stats de futebol em tempo real.",
+  "private": true,
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts",
+    "test": "tsc --noEmit",
+    "demo": "ts-node src/index.ts"
+  },
+  "keywords": [
+    "gemini",
+    "google-genai",
+    "sports-betting",
+    "betting-ai",
+    "tiago-ia"
+  ],
+  "author": "IA do Tiago",
+  "dependencies": {
+    "@google/genai": "^0.7.0",
+    "dotenv": "^16.4.5"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.5.4"
+  }
+}

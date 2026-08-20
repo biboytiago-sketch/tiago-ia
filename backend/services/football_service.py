@@ -15,7 +15,7 @@ Cache:
 
 import os
 import random
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, date
 from typing import Any, Dict, List, Optional
 
 # ====== Carrega variáveis do .env ======
@@ -1434,14 +1434,90 @@ def calcular_sinais_ia(usar_gemini: bool = False,
       • Ambos times marcaram + escanteios altos → CUIDADO (over 2.5 provável mas volátil)
       • Ao vivo com placar 0×0 / 1×0 até 60' + pressão positiva → APOSTAR under/ambos?
     """
-    cache_chave = f"ia_sinais_main_v2_{'gem' if usar_gemini else 'heur'}_{'today' if apenas_hoje_ou_live else 'all'}_{datetime.now().strftime('%Y%m%d%H%M')[:-1]}"
+    from datetime import datetime as _dt
+    hoje_iso = date.today().isoformat()
+
+    # ========== PURGE AUTOMÁTICO SE DATA MUDOU ==========
+    cache_key_dia = "ia_sinais_cache_data_ref_v1"
+    dia_cacheado = _cache_get_ttl(cache_key_dia)
+    if dia_cacheado is not None and str(dia_cacheado) != hoje_iso:
+        # Apaga TODOS caches antigos de IA sinais (ontem e anteriores)
+        try:
+            # _CACHE é o dicionario principal (dict[str, dict{ts,dado}])
+            for k in list(_CACHE.keys()):
+                if k.startswith("ia_sinais_main_v2_"):
+                    _CACHE.pop(k, None)
+        except Exception:
+            pass
+    _cache_set_ttl(cache_key_dia, hoje_iso, 86400)  # cache valido por 24h para este dia
+
+    cache_chave = f"ia_sinais_main_v2_{'gem' if usar_gemini else 'heur'}_{'today' if apenas_hoje_ou_live else 'all'}_{_dt.now().strftime('%Y%m%d%H%M')[:-1]}"
     cache_existente = _cache_get_ttl(cache_chave)
     if cache_existente is not None:
         return cache_existente
 
-    lista_base = get_matches_filtered(status="all")
+    # ========== BASE DE DADOS: PRIORIDADE V3 HOJE (REAL CONFIRMADO) → FILTERED → FALLBACK STRICT ==========
+    # ORDEM CORRIGIDA: V3 obter_jogos_hoje PRIMEIRO (já retorna 90+ jogos reais Libertadores/Brasileirão)
+    # get_matches_filtered só é usado como SEGUNDA opção, pois get_today_matches força fill com simulações.
+    lista_base: List[Dict[str, Any]] = []
+    try:
+        from services.live_sports_service import obter_jogos_hoje as _v3_hoje
+        jogos_v3_flat = _v3_hoje()
+        if jogos_v3_flat and isinstance(jogos_v3_flat, list) and len(jogos_v3_flat) > 0:
+            lista_base = _map_v3_flat_to_v1_fixture_shape(jogos_v3_flat)
+    except Exception:
+        lista_base = []
+
+    # 2ª opção: get_matches_filtered / get_today_matches — SÓ USA SE V3 FALHOU COMPLETAMENTE.
     if not lista_base:
-        lista_base = _fs_mock_all_games_for_signals()
+        filtered_raw = get_matches_filtered(status="all")
+        if filtered_raw:
+            lista_base = list(filtered_raw)
+
+    # ============================================================
+    # FILTRO GLOBAL ANTI-MOCK SEED (aplicado a QUALQUER fonte)
+    # Remove as 8 combinações exatas hardcoded do seed estático
+    # (Newcastle×Atalanta, Arsenal×Roma etc) que apareciam congelados na UI.
+    # NÃO bloqueia times reais individualmente (ex: Goiás vs São Paulo em Copa Sudamericana é REAL).
+    # ============================================================
+    _confrontos_seed_bloqueados = {
+        frozenset({"newcastle", "atalanta"}),
+        frozenset({"arsenal", "roma"}),
+        frozenset({"atalanta", "lyon"}),
+        frozenset({"sport", "goiás"}), frozenset({"sport", "goias"}),
+        frozenset({"atalanta", "arsenal"}),
+        frozenset({"manchester united", "newcastle"}),
+        frozenset({"az alkmaar", "newcastle"}),
+        frozenset({"parma", "atalanta"}),
+        frozenset({"atalanta", "betis"}),
+    }
+    def _partida_nao_e_seed_antigo(m: Dict[str, Any]) -> bool:
+        teams = m.get("teams") or {}
+        h = str(((teams.get("home") or {}).get("name") or "")).strip().lower()
+        a = str(((teams.get("away") or {}).get("name") or "")).strip().lower()
+        if not h or not a:
+            return False
+        par = frozenset({h, a})
+        # match exato OU substring (ex: "newcastle united" contém "newcastle")
+        for seed_par in _confrontos_seed_bloqueados:
+            (s1, s2) = tuple(seed_par)
+            if (s1 in h and s2 in a) or (s2 in h and s1 in a):
+                return False
+        return True
+    lista_base = [p for p in lista_base if _partida_nao_e_seed_antigo(p)]
+
+    # Se mesmo assim vazio: MOSTRAR VAZIO (nao carregar mock) a menos que seja desenvolvimento.
+    # Obs: _fs_mock_all_games_for_signals() agora só é usado se a flag de fallback for true explicitamente.
+    if not lista_base:
+        import os as _os
+        allow_mock = (_os.getenv("ALLOW_SINAIS_FALLBACK_MOCK", "0").strip().lower()
+                      in ("1", "true", "sim", "yes", "s"))
+        if allow_mock:
+            lista_base = _fs_mock_all_games_for_signals()
+        else:
+            # Lista VAZIA clean — UI vai mostrar "nenhum jogo ao vivo..." no lugar dos seed antigos.
+            _cache_set_ttl(cache_chave, [], 45)
+            return []
 
     sinais: List[Dict[str, Any]] = []
 
@@ -1613,6 +1689,72 @@ def calcular_sinais_ia(usar_gemini: bool = False,
 
     _cache_set_ttl(cache_chave, sinais, 90)
     return sinais
+
+
+def _map_v3_flat_to_v1_fixture_shape(v3_jogos_flat: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Converte lista plana do V3 /api/v3/sports/hoje (92 jogos reais Libertadores etc)
+    para o shape aninhado {league, fixture, teams, goals, odds} que calcular_sinais_ia
+    espera (igual ao retorno de get_matches_filtered / API-Football oficial).
+    """
+    out: List[Dict[str, Any]] = []
+    data_hoje = date.today().isoformat()
+    for idx, j in enumerate(v3_jogos_flat or []):
+        if not isinstance(j, dict):
+            continue
+        liga_nome = str(j.get("liga") or j.get("league") or j.get("league_name") or "Amistoso")
+        liga_pais = str(j.get("liga_pais") or j.get("country") or j.get("pais") or "")
+        flag = str(j.get("flag") or j.get("bandeira") or "🏆")
+        casa = str(j.get("time_casa") or j.get("home") or j.get("home_name") or j.get("mandante") or "Casa")
+        fora = str(j.get("time_fora") or j.get("away") or j.get("away_name") or j.get("visitante") or "Fora")
+        hr = str(j.get("horario_br") or j.get("kickoff") or j.get("hr") or "--:--")
+        ss_raw = str(j.get("status_flag") or j.get("status") or j.get("status_short") or "NS")
+        ss = ss_raw[:5] if ss_raw else "NS"
+        try:
+            el = int(j.get("tempo_decorrido") or j.get("elapsed") or 0)
+        except Exception:
+            el = 0
+        try:
+            gh_raw = j.get("placar_casa") or j.get("home_score") or j.get("goals_home")
+            ga_raw = j.get("placar_fora") or j.get("away_score") or j.get("goals_away")
+            gh: Optional[int] = int(gh_raw) if gh_raw is not None and gh_raw != "" else None
+            ga: Optional[int] = int(ga_raw) if ga_raw is not None and ga_raw != "" else None
+        except Exception:
+            gh, ga = None, None
+
+        # Odds: tenta extrair de odds_1x2 (V3), senao gera valores coerentes baseados em nomes (para heuristica funcionar)
+        odds_1x2 = j.get("odds_1x2") or {}
+        if isinstance(odds_1x2, dict) and odds_1x2:
+            try:
+                oh = float(str(odds_1x2.get("home") or odds_1x2.get("casa") or 0).replace(",", "."))
+                ox = float(str(odds_1x2.get("draw") or odds_1x2.get("empate") or 0).replace(",", "."))
+                oa = float(str(odds_1x2.get("away") or odds_1x2.get("fora") or 0).replace(",", "."))
+            except Exception:
+                oh, ox, oa = 2.10, 3.20, 3.40
+        else:
+            oh = float(str(j.get("odds_home") or j.get("oh") or 2.10).replace(",", "."))
+            ox = float(str(j.get("odds_draw") or j.get("ox") or 3.20).replace(",", "."))
+            oa = float(str(j.get("odds_away") or j.get("oa") or 3.40).replace(",", "."))
+        if (oh + ox + oa) <= 3.0:
+            oh, ox, oa = 2.10, 3.20, 3.40
+
+        fixture_id_raw = j.get("fixture_id") or j.get("id") or j.get("fixtureId") or (8000000 + idx)
+        try:
+            fid = int(fixture_id_raw)
+        except Exception:
+            fid = 8000000 + idx
+
+        out.append({
+            "league": {"id": (idx % 500) + 10, "name": liga_nome, "country": liga_pais, "flag": flag, "has_standings": True},
+            "fixture": {"id": fid, "status_short": ss, "elapsed": el, "status_long": ss, "date": data_hoje, "time": hr},
+            "teams": {
+                "home": {"id": 1000 + idx, "name": casa, "logo": j.get("logo_casa") or f"https://media.api-sports.io/football/teams/{(idx % 800) + 1}.png"},
+                "away": {"id": 2000 + idx, "name": fora, "logo": j.get("logo_fora") or f"https://media.api-sports.io/football/teams/{((idx + 13) % 800) + 1}.png"},
+            },
+            "goals": {"home": gh, "away": ga},
+            "odds": {"home_win": f"{oh:.2f}", "draw": f"{ox:.2f}", "away_win": f"{oa:.2f}"},
+        })
+    return out
 
 
 def _fs_mock_all_games_for_signals() -> List[Dict[str, Any]]:

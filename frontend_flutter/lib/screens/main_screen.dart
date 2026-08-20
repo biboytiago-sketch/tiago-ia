@@ -36,13 +36,27 @@ class _MainScreenState extends State<MainScreen> {
   @override
   void initState() {
     super.initState();
-    _carregarSinais();
-    _carregarStatusFontes();
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      // 1) PURGE AUTOMÁTICO SE DATA MUDOU (ontem → hoje)
+      final bool purged = await ApiService.purgeStaleCacheIfDateChanged();
+      if (purged && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content:
+              Text('🧹 Cache antigo apagado (data mudou) · dados atualizados.'),
+          backgroundColor: Color(0xff00c853),
+          duration: Duration(seconds: 3),
+        ));
+      }
+      // 2) FORÇA REFRESH inicial (ignora cache velho, busca LIVE)
+      unawaited(_carregarSinais(silent: false, forceRefresh: true));
+      unawaited(_carregarStatusFontes(silent: false, forceRefresh: true));
+    });
     _timerSinais = Timer.periodic(const Duration(seconds: 60), (_) {
-      if (mounted) _carregarSinais(silent: true);
+      if (mounted) unawaited(_carregarSinais(silent: true, forceRefresh: true));
     });
     _timerStatusFontes = Timer.periodic(const Duration(seconds: 90), (_) {
-      if (mounted) _carregarStatusFontes(silent: true);
+      if (mounted)
+        unawaited(_carregarStatusFontes(silent: true, forceRefresh: false));
     });
   }
 
@@ -103,12 +117,13 @@ class _MainScreenState extends State<MainScreen> {
     ));
   }
 
-  Future<void> _carregarStatusFontes({bool silent = false}) async {
+  Future<void> _carregarStatusFontes(
+      {bool silent = false, bool forceRefresh = false}) async {
     if (!silent && mounted) setState(() => _statusFontesCarregando = true);
     try {
       final bool probe = !silent;
-      final Map<String, dynamic> res =
-          await ApiService.getSportsApiStatus(probe: probe);
+      final Map<String, dynamic> res = await ApiService.getSportsApiStatus(
+          probe: probe, forceRefresh: forceRefresh);
       if (mounted) {
         setState(() {
           _statusFontes = res;
@@ -354,11 +369,15 @@ class _MainScreenState extends State<MainScreen> {
     );
   }
 
-  Future<void> _carregarSinais({bool silent = false}) async {
+  Future<void> _carregarSinais(
+      {bool silent = false, bool forceRefresh = false}) async {
     if (!silent && mounted) setState(() => _sinaisLoading = true);
     try {
-      final Map<String, dynamic> res =
-          await _api.getIaSinais(usarGemini: false, apenasHojeLive: true);
+      final Map<String, dynamic> res = await _api.getIaSinais(
+        usarGemini: false,
+        apenasHojeLive: true,
+        forceRefresh: forceRefresh,
+      );
       if (!mounted) return;
       final List<dynamic> rawSinais = BackendConfig.safeList(res['sinais']);
       final List<Map<String, dynamic>> novos = <Map<String, dynamic>>[
@@ -368,6 +387,7 @@ class _MainScreenState extends State<MainScreen> {
       setState(() {
         _sinais = novos;
         _sinaisLoading = false;
+        _ultimoResSinais = res;
       });
       final List<Map<String, dynamic>> verdesAltos = novos
           .where((Map<String, dynamic> s) =>
@@ -384,8 +404,14 @@ class _MainScreenState extends State<MainScreen> {
               BackendConfig.safeMap(teams['home']);
           final Map<String, dynamic> tAway =
               BackendConfig.safeMap(teams['away']);
-          final String home = tHome['name']?.toString() ?? 'Casa';
-          final String away = tAway['name']?.toString() ?? 'Fora';
+          final String home = tHome['name']?.toString() ??
+              s['home']?.toString() ??
+              s['time_casa']?.toString() ??
+              'Casa';
+          final String away = tAway['name']?.toString() ??
+              s['away']?.toString() ??
+              s['time_fora']?.toString() ??
+              'Fora';
           final int conf = BackendConfig.safeInt(s['confianca'], 70);
           _notificarOportunidade(
               id: fid.hashCode.abs(),
@@ -395,6 +421,41 @@ class _MainScreenState extends State<MainScreen> {
     } catch (_) {
       if (mounted) setState(() => _sinaisLoading = false);
     }
+  }
+
+  Map<String, dynamic>? _ultimoResSinais;
+
+  Future<void> _onForcarAtualizacao() async {
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+      content: Row(
+        children: <Widget>[
+          SizedBox(
+            width: 18,
+            height: 18,
+            child: CircularProgressIndicator(
+                strokeWidth: 2, color: Color(0xffffffff)),
+          ),
+          SizedBox(width: 10),
+          Text('⚡ Forçando atualização LIVE (6 fontes + IA)...'),
+        ],
+      ),
+      duration: Duration(seconds: 2, milliseconds: 500),
+    ));
+    unawaited(_carregarSinais(silent: false, forceRefresh: true));
+    unawaited(_carregarStatusFontes(silent: false, forceRefresh: true));
+  }
+
+  Future<void> _onLimparCache() async {
+    await ApiService.purgeAllCaches();
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('🧹 Todos os caches apagados · recarregando LIVE agora.'),
+        backgroundColor: Color(0xff00c853),
+        duration: Duration(seconds: 3),
+      ));
+    }
+    unawaited(_carregarSinais(silent: false, forceRefresh: true));
+    unawaited(_carregarStatusFontes(silent: false, forceRefresh: true));
   }
 
   @override
@@ -712,6 +773,29 @@ class _MainScreenState extends State<MainScreen> {
               _chipR('⚠️ $totCuidado', 'Cuidado', const Color(0xffffc107)),
               const SizedBox(width: 8),
               _chipR('❌ $totNao', 'Evitar', const Color(0xffef5350)),
+              const SizedBox(width: 6),
+              if (_ultimoResSinais?['cache_hit'] == true ||
+                  _ultimoResSinais?['api_failed'] == true)
+                Tooltip(
+                    message: _ultimoResSinais?['aviso']?.toString() ??
+                        _ultimoResSinais?['erro_detalhe']?.toString() ??
+                        'Cache do dia carregado.',
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 7, vertical: 4),
+                      decoration: BoxDecoration(
+                          color:
+                              const Color(0xffffc107).withValues(alpha: 0.15),
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(
+                              color: const Color(0xffffc107)
+                                  .withValues(alpha: 0.5))),
+                      child: const Text('💾 cache',
+                          style: TextStyle(
+                              color: Color(0xffffc107),
+                              fontSize: 10.5,
+                              fontWeight: FontWeight.w900)),
+                    )),
               const Spacer(),
               if (_sinaisLoading)
                 const SizedBox(
@@ -721,9 +805,33 @@ class _MainScreenState extends State<MainScreen> {
                         strokeWidth: 2,
                         valueColor:
                             AlwaysStoppedAnimation<Color>(Color(0xffce93d8))))
-              else
+              else ...<Widget>[
                 TextButton.icon(
-                    onPressed: () => _carregarSinais(),
+                    onPressed: _onLimparCache,
+                    style: TextButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 9, vertical: 6),
+                        visualDensity: VisualDensity.compact,
+                        foregroundColor: const Color(0xffef5350)),
+                    icon: const Icon(Icons.cleaning_services_rounded, size: 16),
+                    label: const Text('Limpar Cache',
+                        style: TextStyle(
+                            fontSize: 11, fontWeight: FontWeight.w800))),
+                const SizedBox(width: 4),
+                TextButton.icon(
+                    onPressed: _onForcarAtualizacao,
+                    style: TextButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 9, vertical: 6),
+                        visualDensity: VisualDensity.compact,
+                        foregroundColor: const Color(0xff2196f3)),
+                    icon: const Icon(Icons.bolt_rounded, size: 17),
+                    label: const Text('Forçar Live',
+                        style: TextStyle(
+                            fontSize: 11, fontWeight: FontWeight.w800))),
+                const SizedBox(width: 4),
+                TextButton.icon(
+                    onPressed: () => _carregarSinais(forceRefresh: false),
                     style: TextButton.styleFrom(
                         padding: const EdgeInsets.symmetric(
                             horizontal: 10, vertical: 6),
@@ -733,6 +841,7 @@ class _MainScreenState extends State<MainScreen> {
                     label: const Text('Recalcular',
                         style: TextStyle(
                             fontSize: 12, fontWeight: FontWeight.w800))),
+              ],
             ]),
             const SizedBox(height: 10),
             const Divider(color: Colors.white10, height: 1),
@@ -741,11 +850,60 @@ class _MainScreenState extends State<MainScreen> {
               const Padding(
                 padding: EdgeInsets.symmetric(vertical: 18),
                 child: Center(
-                    child: Text('Buscando melhores jogos de hoje...',
+                    child: Text('Buscando melhores jogos de hoje LIVE...',
                         style: TextStyle(
                             color: Colors.white60,
                             fontSize: 12.5,
                             fontWeight: FontWeight.w700))),
+              )
+            else if (_sinais.isEmpty)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 18),
+                child: Center(
+                    child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: <Widget>[
+                      const Icon(Icons.sports_soccer_rounded,
+                          size: 34, color: Colors.white24),
+                      const SizedBox(height: 10),
+                      const Text(
+                        'Nenhum jogo ao vivo no momento.',
+                        style: TextStyle(
+                            color: Colors.white70,
+                            fontSize: 13.5,
+                            fontWeight: FontWeight.w800),
+                      ),
+                      const SizedBox(height: 4),
+                      const Text(
+                        'Buscando próximas partidas agendadas para hoje...',
+                        style: TextStyle(
+                            color: Colors.white54,
+                            fontSize: 11.5,
+                            fontWeight: FontWeight.w600),
+                      ),
+                      if (_ultimoResSinais?['erro_detalhe'] !=
+                          null) ...<Widget>[
+                        const SizedBox(height: 10),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 10, vertical: 8),
+                          decoration: BoxDecoration(
+                              color: const Color(0xffef5350)
+                                  .withValues(alpha: 0.12),
+                              borderRadius: BorderRadius.circular(10),
+                              border: Border.all(
+                                  color: const Color(0xffef5350)
+                                      .withValues(alpha: 0.35))),
+                          child: Text(
+                            '⚠️ ${_ultimoResSinais!['erro_detalhe']}',
+                            style: const TextStyle(
+                                color: Color(0xffef9a9a),
+                                fontSize: 11,
+                                fontWeight: FontWeight.w700),
+                          ),
+                        ),
+                      ],
+                    ])),
               )
             else if (topVerdes.isEmpty)
               Padding(
@@ -753,18 +911,25 @@ class _MainScreenState extends State<MainScreen> {
                 child: Center(
                     child: Column(
                         mainAxisSize: MainAxisSize.min,
-                        children: <Widget>[
-                      const Icon(Icons.eco_outlined,
-                          size: 32, color: Colors.white24),
-                      const SizedBox(height: 8),
+                        children: const <Widget>[
+                      Icon(Icons.eco_outlined,
+                          size: 32, color: Color(0xff66bb6a)),
+                      SizedBox(height: 10),
                       Text(
-                          _sinais.isEmpty
-                              ? 'Sem partidas. Tente novamente em breve.'
-                              : 'Nenhum sinal VERDE seguro encontrado hoje.',
-                          style: const TextStyle(
-                              color: Colors.white60,
-                              fontSize: 12.5,
-                              fontWeight: FontWeight.w700)),
+                        'Nenhum sinal VERDE seguro encontrado hoje.',
+                        style: TextStyle(
+                            color: Color(0xffc5e1a5),
+                            fontSize: 13,
+                            fontWeight: FontWeight.w800),
+                      ),
+                      SizedBox(height: 3),
+                      Text(
+                        'Aguarde novos jogos sendo analisados a cada 60s.',
+                        style: TextStyle(
+                            color: Colors.white54,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600),
+                      ),
                     ])),
               )
             else

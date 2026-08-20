@@ -1,11 +1,95 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../core/backend_config.dart';
 
 class ApiService {
+  // ============================================================
+  // CACHE LAYER: SharedPreferences com validação por DATA
+  // - Se a data de hoje mudou → PURGE automático de sinais + status
+  // - Se API falhar: retorna cache válido do dia (nao usa frozen seeds!)
+  // - Último caso: lista VAZIA clean com flag api_failed=true
+  // ============================================================
+  static const String _pkSinais = 'tiagoia_cache_ia_sinais_v1';
+  static const String _pkSinaisData = 'tiagoia_cache_ia_sinais_day_v1';
+  static const String _pkStatus = 'tiagoia_cache_sports_status_v1';
+  static const String _pkStatusData = 'tiagoia_cache_sports_status_day_v1';
+
+  static String _todayIso() {
+    final DateTime now = DateTime.now();
+    return '${now.year.toString().padLeft(4, '0')}-'
+        '${now.month.toString().padLeft(2, '0')}-'
+        '${now.day.toString().padLeft(2, '0')}';
+  }
+
+  static Future<bool> purgeStaleCacheIfDateChanged() async {
+    try {
+      final SharedPreferences sp = await SharedPreferences.getInstance();
+      final String hoje = _todayIso();
+      bool purged = false;
+      for (final MapEntry<String, String> e in <String, String>{
+        _pkSinaisData: _pkSinais,
+        _pkStatusData: _pkStatus,
+      }.entries) {
+        final String? stored = sp.getString(e.key);
+        if (stored != null && stored != hoje) {
+          await sp.remove(e.value);
+          await sp.setString(e.key, hoje);
+          purged = true;
+          debugPrint(
+              '[ApiService] PURGE_AUTO ${e.value}: data $stored -> $hoje');
+        } else if (stored == null) {
+          await sp.setString(e.key, hoje);
+        }
+      }
+      return purged;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  static Future<void> purgeAllCaches() async {
+    try {
+      final SharedPreferences sp = await SharedPreferences.getInstance();
+      await sp.remove(_pkSinais);
+      await sp.remove(_pkSinaisData);
+      await sp.remove(_pkStatus);
+      await sp.remove(_pkStatusData);
+      BackendConfig.invalidarCache();
+      debugPrint(
+          '[ApiService] PURGE_TOTAL: SharedPreferences + BackendConfig OK');
+    } catch (_) {}
+  }
+
+  static Future<void> _cacheWriteJson(final String keyData,
+      final String keyPayload, final Map<String, dynamic> payload) async {
+    try {
+      final SharedPreferences sp = await SharedPreferences.getInstance();
+      await sp.setString(keyData, _todayIso());
+      await sp.setString(keyPayload, jsonEncode(payload));
+    } catch (_) {}
+  }
+
+  static Future<Map<String, dynamic>?> _cacheReadJson(
+    final String keyData,
+    final String keyPayload,
+  ) async {
+    try {
+      final SharedPreferences sp = await SharedPreferences.getInstance();
+      final String? d = sp.getString(keyData);
+      if (d != _todayIso()) return null;
+      final String? raw = sp.getString(keyPayload);
+      if (raw == null || raw.isEmpty) return null;
+      final Object? decoded = jsonDecode(raw);
+      if (decoded is Map<String, dynamic>) return decoded;
+    } catch (_) {}
+    return null;
+  }
+
   // ============================================================
   // AUTO-RESOLVE DE BACKEND (fallback chain):
   // 1. Usa cache de 6h se válido
@@ -1661,44 +1745,116 @@ class ApiService {
   Future<Map<String, dynamic>> getIaSinais({
     bool usarGemini = false,
     bool apenasHojeLive = true,
+    bool forceRefresh = false,
     Duration timeout = const Duration(seconds: 12),
   }) async {
     final List<String> queries = <String>[
       'usar_gemini=$usarGemini',
       'apenas_hoje_live=$apenasHojeLive',
+      'salt=${DateTime.now().millisecondsSinceEpoch % 10000}',
     ];
     final String base = await _v1();
     final String url = '$base/ia/sinais?${queries.join('&')}';
+    int httpStatus = 0;
+    String? erroDetalhe;
+
+    // 1) Cache se NÃO é forçado
+    if (!forceRefresh) {
+      final Map<String, dynamic>? cached =
+          await _cacheReadJson(_pkSinaisData, _pkSinais);
+      if (cached != null) {
+        debugPrint('[ApiService] getIaSinais: CACHE HIT dia ${_todayIso()}'
+            ' (total=${cached['total']})');
+        return cached;
+      }
+    }
+
+    // 2) HTTP LIVE (com logs detalhados)
     try {
+      debugPrint('[ApiService] GET (live) $url');
       final http.Response resp =
           await http.get(Uri.parse(url), headers: _headers).timeout(timeout);
-      if (resp.statusCode == 200) {
+      httpStatus = resp.statusCode;
+      if (httpStatus == 200) {
         final Map<String, dynamic> data =
             Map<String, dynamic>.from(jsonDecode(resp.body));
-        return <String, dynamic>{
-          'ok': true,
-          'fonte': data['fonte'] ?? 'API',
-          'totais':
-              Map<String, dynamic>.from(data['totais'] ?? <String, dynamic>{}),
-          'total': data['total'] as int? ?? 0,
-          'generated_at': data['generated_at'],
-          'sinais': List<Map<String, dynamic>>.from(
-            ((data['sinais'] as List<dynamic>?) ?? <dynamic>[])
-                .map<Map<String, dynamic>>(
-                    (dynamic e) => Map<String, dynamic>.from(e as Map)),
-          ),
-        };
-      }
-    } catch (_) {}
+        final int total = data['total'] as int? ?? 0;
+        final List<Map<String, dynamic>> sinais =
+            List<Map<String, dynamic>>.from(
+          ((data['sinais'] as List<dynamic>?) ?? <dynamic>[])
+              .map<Map<String, dynamic>>(
+                  (dynamic e) => Map<String, dynamic>.from(e as Map)),
+        );
+        final Map<String, dynamic> totais =
+            Map<String, dynamic>.from(data['totais'] ?? <String, dynamic>{});
+        final String fonte = data['fonte']?.toString() ?? 'API';
+        final String? generatedAt = data['generated_at']?.toString();
 
-    // â”€â”€â”€â”€ FALLBACK HEURÃSTICO LOCAL (offline) â”€â”€â”€â”€
+        final Map<String, dynamic> saida = <String, dynamic>{
+          'ok': true,
+          'fonte': fonte,
+          'totais': totais,
+          'total': total,
+          'generated_at': generatedAt ?? DateTime.now().toIso8601String(),
+          'sinais': sinais,
+          'http_status': 200,
+          'cache_hit': false,
+          'api_failed': false,
+        };
+        await _cacheWriteJson(_pkSinaisData, _pkSinais, saida);
+        debugPrint(
+            '[ApiService] getIaSinais LIVE OK: $total sinais (fonte=$fonte)');
+        return saida;
+      } else if (httpStatus == 401) {
+        erroDetalhe = 'HTTP 401 Unauthorized · chave inválida (API)';
+      } else if (httpStatus == 403) {
+        erroDetalhe = 'HTTP 403 Forbidden · plano não pago';
+      } else if (httpStatus == 429) {
+        erroDetalhe = 'HTTP 429 Rate Limit';
+      } else {
+        erroDetalhe = 'HTTP $httpStatus';
+      }
+      debugPrint('[ApiService] getIaSinais FALHOU: $erroDetalhe · url=$url');
+    } catch (e) {
+      httpStatus = 0;
+      erroDetalhe = 'Exception: ${e.toString().replaceRange(
+            e.toString().length > 160 ? 160 : e.toString().length,
+            e.toString().length,
+            '...',
+          )}';
+      debugPrint('[ApiService] getIaSinais EXCEPTION: $erroDetalhe · url=$url');
+    }
+
+    // 3) Fallback 1: cache válido do DIA (não seeds antigos!)
+    final Map<String, dynamic>? cached =
+        await _cacheReadJson(_pkSinaisData, _pkSinais);
+    if (cached != null) {
+      final Map<String, dynamic> out = Map<String, dynamic>.from(cached);
+      out['cache_hit'] = true;
+      out['http_status'] = httpStatus;
+      out['api_failed'] = true;
+      out['erro_detalhe'] = erroDetalhe;
+      out['aviso'] = 'API fora temporariamente · usando cache do dia';
+      debugPrint(
+          '[ApiService] getIaSinais CACHE FALLBACK · total=${out['total']}');
+      return out;
+    }
+
+    // 4) Fallback final: LISTA VAZIA clean (NÃO USA SEEDS ESTÁTICOS: deprecated!)
+    debugPrint(
+        '[ApiService] getIaSinais: API falhou e sem cache → retorna lista VAZIA clean');
     return <String, dynamic>{
       'ok': true,
-      'fonte': 'HeurÃ­stica Local Offline',
-      'totais': _getIaSinaisLocal()['totais'] as Map<String, int>,
-      'total': _getIaSinaisLocal()['total'] as int,
+      'fonte': 'Offline (cache vazio)',
+      'totais': <String, int>{'apostar': 0, 'cuidado': 0, 'nao_apostar': 0},
+      'total': 0,
       'generated_at': DateTime.now().toIso8601String(),
-      'sinais': _getIaSinaisLocal()['sinais'] as List<Map<String, dynamic>>,
+      'sinais': <Map<String, dynamic>>[],
+      'http_status': httpStatus,
+      'cache_hit': false,
+      'api_failed': true,
+      'erro_detalhe': erroDetalhe,
+      'lista_vazia': true,
     };
   }
 
@@ -2294,30 +2450,75 @@ class ApiService {
   // ── STEP 1 · API STATUS BADGE ────────────────────────────────
   static Future<Map<String, dynamic>> getSportsApiStatus({
     bool probe = true,
+    bool forceRefresh = false,
     Duration timeout = const Duration(
         seconds: 30), // 🟢 antes 20s (ping em 6 fontes pode demorar)
   }) async {
+    // 1) Cache se nao forcar refresh
+    if (!forceRefresh) {
+      final Map<String, dynamic>? cached =
+          await _cacheReadJson(_pkStatusData, _pkStatus);
+      if (cached != null) {
+        debugPrint(
+            '[ApiService] getSportsApiStatus: CACHE HIT dia ${_todayIso()}');
+        return cached;
+      }
+    }
+
+    String? ultimoErro;
+    int ultimoStatus = 0;
     try {
       final String v1 = await resolveV1();
       final String v3 = await resolveV3();
       http.Response? resp;
       for (final String base in <String>[v3, v1]) {
+        final String url =
+            '$base/sports/api-status?probe=${probe ? 'true' : 'false'}&salt=${DateTime.now().millisecondsSinceEpoch % 1000000}';
         try {
+          debugPrint('[ApiService] GET SportsApiStatus LIVE $url');
           resp = await http
-              .get(Uri.parse(
-                  '$base/sports/api-status?probe=${probe ? 'true' : 'false'}'))
+              .get(Uri.parse(url), headers: _headers)
               .timeout(timeout);
+          ultimoStatus = resp.statusCode;
           if (resp.statusCode == 200) break;
-        } catch (_) {
+          ultimoErro = 'HTTP ${resp.statusCode} em $base';
+        } catch (e) {
+          ultimoErro = 'Exception: $e';
           resp = null;
         }
       }
       if (resp != null && resp.statusCode == 200) {
-        return Map<String, dynamic>.from(
+        final Map<String, dynamic> payload = Map<String, dynamic>.from(
             jsonDecode(resp.body) as Map<String, dynamic>);
+        payload['cache_hit'] = false;
+        payload['api_failed'] = false;
+        payload['http_status'] = 200;
+        await _cacheWriteJson(_pkStatusData, _pkStatus, payload);
+        debugPrint('[ApiService] getSportsApiStatus LIVE OK: '
+            'online=${payload['fontes_online']}/${payload['total_fontes']} '
+            'status=${payload['status_geral']}');
+        return payload;
       }
-    } catch (_) {}
-    // FALLBACK LOCAL (modo offline ou backend indisponível): status simulado
+    } catch (e) {
+      ultimoErro = 'Exception geral: $e';
+    }
+
+    // 2) Fallback 1: cache valido do DIA (nao mock 0/6 hardcoded!)
+    final Map<String, dynamic>? cached2 =
+        await _cacheReadJson(_pkStatusData, _pkStatus);
+    if (cached2 != null) {
+      final Map<String, dynamic> out = Map<String, dynamic>.from(cached2);
+      out['cache_hit'] = true;
+      out['api_failed'] = true;
+      out['http_status'] = ultimoStatus;
+      out['erro_detalhe'] = ultimoErro;
+      debugPrint('[ApiService] getSportsApiStatus CACHE FALLBACK');
+      return out;
+    }
+
+    // 3) Fallback final: SOMENTE se NENHUM cache do dia.
+    debugPrint(
+        '[ApiService] getSportsApiStatus: MOCK 0/6 (sem cache, API falhou: $ultimoErro)');
     return <String, dynamic>{
       'assinatura': 'IA do Tiago · Offline Mock',
       'versao': '3.4.0-mock',
@@ -2326,6 +2527,11 @@ class ApiService {
       'fontes_online': 0,
       'fontes_chave_ok': 0,
       'total_fontes': 6,
+      'http_status': ultimoStatus,
+      'cache_hit': false,
+      'api_failed': true,
+      'erro_detalhe': ultimoErro,
+      'lista_vazia': false,
       'fallback': <String, dynamic>{
         'ativa': true,
         'label': 'IA do Tiago · Dinâmico',
@@ -2336,11 +2542,12 @@ class ApiService {
           'ordem': 1,
           'label': 'Offline (Fallback IA)',
           'camada': 'FALLBACK',
-          'chave_configurada': true,
-          'probe_online': 'MOCK',
+          'chave_configurada': false,
+          'probe_online': false,
           'latencia_ms': 0,
-          'ultimo_erro': 'Backend não conectado — usando seed local.',
-          'quantidade_jogos_recente': 18,
+          'ultimo_erro':
+              ultimoErro ?? 'Backend não conectado — aguardando rede.',
+          'quantidade_jogos_recente': 0,
         },
       ],
       'env_vars_check': <String, dynamic>{
