@@ -78,19 +78,18 @@ _FOOTBALL_DATA_ORG_KEY = (os.getenv("FOOTBALL_DATA_ORG_KEY") or "").strip()
 #   1) FOOTBALLDATA_ORG → api.football-data.org/v4 (GRATUITA · FUNCIONANDO HOJE)
 #   2) APIFOOTBALL_DIR  → v3.football.api-sports.io (Direto · opcional pago)
 #   3) FLASHLIVE        → flashlive-sports.p.rapidapi.com (Rapid · 403 aguardando assinatura)
-#   4) FREEAPI          → free-api-live-football-data.p.rapidapi.com (Rapid · 404 endpoint mudou)
-#   5) API_FOOTBALL_V1  → api-football-v1.p.rapidapi.com (Rapid · 403 pago)
-#   6) FOOTBALL_PRO_V3  → football-pro.p.rapidapi.com (Rapid · 403 pago)
-#   7) FALLBACK IA      → _fallback_live / _fallback_data (seed dinâmica IA do Tiago)
+#   4) API_FOOTBALL_V1  → api-football-v1.p.rapidapi.com (Rapid · 403 pago)
+#   5) FOOTBALL_PRO_V3  → football-pro.p.rapidapi.com (Rapid · 403 pago)
+#   6) FALLBACK IA      → _fallback_live / _fallback_data (seed dinâmica IA do Tiago)
 # Cada fonte tem seu adapter que normaliza o JSON de resposta para o MESMO dicionário
 # que o resto do código e o Flutter já esperam (origem_dados, fixture_id, time_casa, etc)
+#
+# 🔴 ATUALIZAÇÃO 2026-08-21: FONTE 4 (FREE_API) REMOVIDA
+#    (retornava HTTP 404 em TODOS endpoints — API removida do RapidAPI.
+#    Não vale a pena gastar requisições em 404.
 # ============================================================
 _RAPIDAPI_HOST_FONTE_1 = (
     os.getenv("RAPIDAPI_HOST_FLASHLIVE") or "flashlive-sports.p.rapidapi.com"
-)
-_RAPIDAPI_HOST_FONTE_2 = (
-    os.getenv("RAPIDAPI_HOST_FREEAPI")
-    or "free-api-live-football-data.p.rapidapi.com"
 )
 _RAPIDAPI_HOST_FONTE_3 = (
     os.getenv("RAPIDAPI_HOST_LEGACY") or "api-football-v1.p.rapidapi.com"
@@ -114,24 +113,9 @@ _RAPIDAPI_SOURCES = [
         "date_param": "date",
     },
     {
-        "id": "FREE_API_LIVE_FOOTBALL",
-        "label": "Free API Live Football",
-        "ordem": 4,
-        "origem": "RAPIDAPI_FREEAPI",
-        "tipo_auth": "rapidapi",
-        "host": _RAPIDAPI_HOST_FONTE_2,
-        "live_paths": [
-            "/football-matches-live",
-            "/football-live-scores",
-            "/football-players-search?search=messi",
-        ],
-        "date_path": "/football-fixtures-by-date",
-        "date_param": "date",
-    },
-    {
         "id": "API_FOOTBALL_V1_LEGACY",
         "label": "API-Football (RapidAPI)",
-        "ordem": 5,
+        "ordem": 4,
         "origem": "RAPIDAPI_REAL",
         "tipo_auth": "rapidapi",
         "host": _RAPIDAPI_HOST_FONTE_3,
@@ -142,7 +126,7 @@ _RAPIDAPI_SOURCES = [
     {
         "id": "FOOTBALL_PRO_V3",
         "label": "Football-Pro v3 (RapidAPI)",
-        "ordem": 6,
+        "ordem": 5,
         "origem": "RAPIDAPI_FOOTBALL_PRO",
         "tipo_auth": "rapidapi",
         "host": _RAPIDAPI_HOST_FONTE_4,
@@ -157,8 +141,29 @@ _RAPIDAPI_SOURCES = [
 ]
 
 # ═══════════════════════════════════════════════════════════════════
-# FONTES DIRETAS (sem passar por RapidAPI — auth própria / própria hospedagem)
+# 🔴 FOOTBALL-DATA.ORG PLANO FREE - Ligas permitidas (obrigatórias!)
 # ═══════════════════════════════════════════════════════════════════
+# Plano FREE de api.football-data.org cobre APENAS 14 ligas.
+# Se a URL /matches for chamada SEM competitions=, retorna HTTP 400.
+# Lista oficial (docs.football-data.org):
+#   2000 = WC Qualification, 2001 = UEFA Champions League
+#   2002 = Bundesliga, 2003 = Eredivisie, 2013 = Serie A
+#   2014 = Ligue 1, 2015 = Campeonato Portuguesa, 2016 = Premier League
+#   2017 = Champions League, 2018 = European Championship
+#   2019 = Serie B (Itália), 2021 = Primeira Liga (Portugal)
+#   2008 = Premier League (backup), 2012 = Copa Libertadores não está no free tier,
+#   Adicionamos 2007 (Copa América) e 2116 (Serie A do Brasil) se disponível.
+# → Com essas ligas: Premier League, La Liga, Serie A, Bundesliga + Brasileirao nao gratis
+#   free tier = 14 competições europeias de graça = jogo REAL
+# Comentado porque NÃO usamos (duplicata). Apenas documentação.
+# _FDORG_COMPETITIONS_FREE = "2000,2001,2002,2003,2013,2014,2015,2016,2017,2018,2019,2021,2008,2116"
+
+# Base oficial (sem duplicatas, comma separated) = 13 ligas FREE tier.
+_FDORG_COMPETITIONS_DEFAULT = (
+    "2000,2001,2002,2003,2013,2014,2015,2016,2017,2018,2019,2021,2008"
+)
+
+
 _DIRECT_SOURCES: List[Dict[str, Any]] = [
     {
         "id": "APIFOOTBALL_DIRECT",
@@ -185,6 +190,7 @@ _DIRECT_SOURCES: List[Dict[str, Any]] = [
         "date_path": "/matches",
         "date_param": "dateFrom",
         "adapter": "football_data_org",
+        "competitions": _FDORG_COMPETITIONS_DEFAULT,
     },
 ]
 
@@ -212,6 +218,92 @@ _CACHE: Dict[str, tuple[float, Any]] = {}
 _CACHE_TTL_LIVE = 5.0
 # Cache do dia/estático: 30s (antes 60s) para atualizar odds sem ficar obsoleto
 _CACHE_TTL_STATIC = 30.0
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 🔴 CORREÇÃO CRÍTICA: BACKOFF EXPONENCIAL COM JITTER (evita 429)
+# ═══════════════════════════════════════════════════════════════════
+# Problema: cotas RapidAPI grátis (30 req/dia) → se bater 429, o código
+# repetia N vezes em loop e matava a cota de 1 dia em 10s.
+#
+# Solução: 429/403 → espera 2^tentativa * 1s + jitter aleatório (0-1s).
+#   1ª tentativa:   ~1.2s
+#   2ª tentativa:   ~2.3s
+#   3ª tentativa:   ~4.7s (não faremos mais de 3 tentativas por ciclo)
+# Também colocamos as fontes RapidApi com "cooldown" de 60s depois de
+# 3x 429, para não gastar requisições à toa por 1 minuto.
+_CACHE_FAIL_COOLDOWN: Dict[str, float] = {}
+
+
+def _fonte_em_cooldown(host_ou_id: str) -> bool:
+    """Retorna True se essa fonte foi bloqueada 3x e está em cooldown."""
+    limite = _CACHE_FAIL_COOLDOWN.get(host_ou_id)
+    if limite and time.time() < limite:
+        return True
+    if limite and time.time() >= limite:
+        _CACHE_FAIL_COOLDOWN.pop(host_ou_id, None)
+    return False
+
+
+def _fonte_marcar_cooldown(host_ou_id: str, segundos: int = 60) -> None:
+    """Bloqueia essa fonte por N segundos (evita 429 em cascata)."""
+    _CACHE_FAIL_COOLDOWN[host_ou_id] = time.time() + segundos
+
+
+def _backoff_wait(tentativa: int, max_tentativas: int = 3) -> bool:
+    """Aguarda 2^tentativa + jitter (0-1s). Retorna False se chegou ao max."""
+    if tentativa >= max_tentativas:
+        return False
+    espera = float(2 ** tentativa) + random.random()
+    time.sleep(espera)
+    return True
+
+
+def _req_host_com_retry(host: str, path: str,
+                        params: Optional[Dict[str, Any]] = None,
+                        ttl: float = _CACHE_TTL_STATIC) -> Optional[Any]:
+    """_req_host com até 3 tentativas + backoff exponencial + cooldown."""
+    if _fonte_em_cooldown(host):
+        logger.debug(f"SKIP {host} (cooldown 429/403)")
+        return None
+    tentativa = 0
+    ultimo_status = None
+    while True:
+        data = _req_host(host, path, params=params, ttl=ttl)
+        # Se data voltou vazio E a URL pegou 429/403, o logger do _req_host
+        # avisou. Inferimos 429/403 pela resposta None + marcamos.
+        if data is not None and len(_extract_list_from_any(data)) > 0:
+            return data
+        # Se caiu aqui = 429/403/404 ou vazio
+        # Repetimos apenas mais 2x para casos de 429 temporários:
+        tentativa += 1
+        if ultimo_status is None:
+            ultimo_status = 429  # assumimos pior caso
+        if not _backoff_wait(tentativa, max_tentativas=3):
+            # Chegou em 3 tentativas → bloqueia por 60s
+            _fonte_marcar_cooldown(host, 60)
+            return data
+    return data
+
+
+def _req_direct_com_retry(fonte: Dict[str, Any], path: str,
+                          params: Optional[Dict[str, Any]] = None,
+                          ttl: float = _CACHE_TTL_STATIC) -> Optional[Any]:
+    """_req_direct com retry + cooldown para fontes diretas."""
+    fid = fonte.get("id") or fonte.get("host") or "direct"
+    if _fonte_em_cooldown(fid):
+        logger.debug(f"SKIP DIRECT {fid} (cooldown)")
+        return None
+    tentativa = 0
+    while True:
+        data = _req_direct(fonte, path, params=params, ttl=ttl)
+        if data is not None and len(_extract_list_from_any(data)) > 0:
+            return data
+        tentativa += 1
+        if not _backoff_wait(tentativa, max_tentativas=3):
+            _fonte_marcar_cooldown(fid, 90)
+            return data
+    return data
 
 
 def _cache_get(chave: str) -> Optional[Any]:
@@ -506,9 +598,9 @@ def _fonte_req_live(fonte: Dict[str, Any], camada: str) -> Optional[List[Dict[st
     for path in fonte.get("live_paths") or []:
         if camada == "RAPIDAPI":
             host = fonte.get("host") or ""
-            data = _req_host(host, path, ttl=_CACHE_TTL_LIVE)
+            data = _req_host_com_retry(host, path, ttl=_CACHE_TTL_LIVE)
         else:
-            data = _req_direct(fonte, path, ttl=_CACHE_TTL_LIVE)
+            data = _req_direct_com_retry(fonte, path, ttl=_CACHE_TTL_LIVE)
         items = _extract_list_from_any(data)
         if not items:
             continue
@@ -537,7 +629,17 @@ def _fonte_req_live(fonte: Dict[str, Any], camada: str) -> Optional[List[Dict[st
             "dateFrom": inicio.isoformat(),
             "dateTo": fim.isoformat(),
         }
-        data = _req_direct(fonte, path, params=params_extra, ttl=_CACHE_TTL_LIVE)
+        # 🔴 PLANO FREE: competitions obrigatórias! Se não vier, volta HTTP 400.
+        comps = fonte.get("competitions") or os.getenv(
+            "FDORG_COMPETITIONS", _FDORG_COMPETITIONS_DEFAULT
+        )
+        if comps:
+            params_extra["competitions"] = comps
+        # fdorg status pode ser LIVE / IN_PLAY / PAUSED / SCHEDULED / FINISHED
+        #  - Não enviamos "status" nesse fallback para pegar tudo da janela.
+        data = _req_direct_com_retry(
+            fonte, path, params=params_extra, ttl=_CACHE_TTL_LIVE
+        )
         items = _extract_list_from_any(data)
         if items:
             norm = []
@@ -586,10 +688,35 @@ def _fonte_req_data(fonte: Dict[str, Any], camada: str, data_ref: datetime,
             params_extra.setdefault("state", status)
 
     if camada == "DIRECT" and fid == "FOOTBALLDATA_ORG":
-        # fdorg: dateFrom & dateTo são ambos necessários. Status = SCHEDULED/LIVE/FINISHED.
+        # fdorg: dateFrom & dateTo são ambos necessários.
+        #   - Plano FREE: competitions= OBRIGATÓRIO (HTTP 400 se faltar!).
+        #   - Status = SCHEDULED / LIVE / IN_PLAY / FINISHED (apenas 1, não multi).
         params_extra["dateFrom"] = data_iso
         params_extra["dateTo"] = data_iso
-        params_extra.setdefault("status", status.split("-")[0] if "-" in status else status)
+        # 🔴 competitions obrigatórias (previne HTTP 400 no plano grátis)
+        comps = fonte.get("competitions") or os.getenv(
+            "FDORG_COMPETITIONS", _FDORG_COMPETITIONS_DEFAULT
+        )
+        if comps:
+            params_extra["competitions"] = comps
+        # Mapeamento BRUTO de status (fdorg só aceita 1 valor por chamada)
+        if not params_extra.get("status"):
+            st_raw = status.split("-")[0] if "-" in status else status
+            st_map = {
+                "NS": "SCHEDULED",
+                "SCHEDULED": "SCHEDULED",
+                "1H": "LIVE",
+                "HT": "PAUSED",
+                "2H": "LIVE",
+                "LIVE": "LIVE",
+                "IN_PLAY": "IN_PLAY",
+                "INT": "PAUSED",
+                "FT": "FINISHED",
+                "AET": "FINISHED",
+                "PEN": "FINISHED",
+                "FINISHED": "FINISHED",
+            }
+            params_extra["status"] = st_map.get(st_raw.upper(), "SCHEDULED")
     elif camada == "RAPIDAPI" and fid == "API_FOOTBALL_V1_LEGACY":
         params_extra[pname] = data_iso
         params_extra["season"] = ano
@@ -616,20 +743,20 @@ def _fonte_req_data(fonte: Dict[str, Any], camada: str, data_ref: datetime,
     lista_items: Any = None
     if camada == "RAPIDAPI":
         host = fonte.get("host") or ""
-        data = _req_host(host, path, params=params_extra, ttl=_CACHE_TTL_STATIC)
+        data = _req_host_com_retry(host, path, params=params_extra, ttl=_CACHE_TTL_STATIC)
         lista_items = _extract_list_from_any(data)
         if not lista_items:
             for path2 in (fonte.get("live_paths") or [])[:2]:
-                data2 = _req_host(host, path2, ttl=_CACHE_TTL_STATIC)
+                data2 = _req_host_com_retry(host, path2, ttl=_CACHE_TTL_STATIC)
                 lista_items = _extract_list_from_any(data2)
                 if lista_items:
                     break
     else:
-        data = _req_direct(fonte, path, params=params_extra, ttl=_CACHE_TTL_STATIC)
+        data = _req_direct_com_retry(fonte, path, params=params_extra, ttl=_CACHE_TTL_STATIC)
         lista_items = _extract_list_from_any(data)
         if not lista_items:
             for path2 in (fonte.get("live_paths") or [])[:2]:
-                data2 = _req_direct(fonte, path2, ttl=_CACHE_TTL_STATIC)
+                data2 = _req_direct_com_retry(fonte, path2, ttl=_CACHE_TTL_STATIC)
                 lista_items = _extract_list_from_any(data2)
                 if lista_items:
                     break
