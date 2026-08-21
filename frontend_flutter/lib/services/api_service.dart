@@ -100,6 +100,73 @@ class ApiService {
   static const String baseUrlRender = BackendConfig.baseV1;
   static const bool useRender = false;
 
+  // ============================================================
+  // HELPERS: normaliza campos que podem chegar como Map (ex: liga={id,name})
+  // Garante String plana para exibição no Flutter.
+  // ============================================================
+  static String _extrairLigaString(dynamic v) {
+    if (v == null) return '';
+    if (v is String) return v;
+    if (v is Map) {
+      final Map<String, dynamic> m = BackendConfig.safeMap(v);
+      final String n = BackendConfig.safeString(m['name']);
+      if (n.isNotEmpty) return n;
+      final String n2 = BackendConfig.safeString(m['nome']);
+      if (n2.isNotEmpty) return n2;
+      final String n3 = BackendConfig.safeString(m['liga']);
+      if (n3.isNotEmpty) return n3;
+    }
+    return v.toString();
+  }
+
+  /// Extrai objeto LIGA compatível com flashscore_home_screen (que espera
+  /// `{id, name, country, flag}`). Se `value` já for Map, retorna ele mesmo
+  /// (com defaults). Se for STRING plana (ex: "Championship"), monta um
+  /// Map sintético compatível para não crashar em `s['league'] as Map`.
+  static Map<String, dynamic> _extrairLigaComoMap(dynamic value,
+      {String fallbackName = ''}) {
+    if (value is Map) return BackendConfig.safeMap(value);
+    final String nome = value is String
+        ? value
+        : (_extrairLigaString(value).isEmpty
+            ? fallbackName
+            : _extrairLigaString(value));
+    return <String, dynamic>{
+      'id': 0,
+      'name': nome,
+      'country': '',
+      'flag': '',
+    };
+  }
+
+  static List<Map<String, dynamic>> _normalizarListaSinais(
+      List<Map<String, dynamic>> lista) {
+    return lista.map<Map<String, dynamic>>((Map<String, dynamic> s) {
+      final Map<String, dynamic> out = Map<String, dynamic>.from(s);
+      // 1) Extrai nome da liga como string plana
+      final String ligaFlat = _extrairLigaString(out['liga']);
+      final String leagueFlat = _extrairLigaString(out['league']);
+      final String nomeFinal = ligaFlat.isNotEmpty ? ligaFlat : leagueFlat;
+      // 2) Campos flat (string) — telas antigas leem `out['liga']` como texto
+      if (nomeFinal.isNotEmpty) {
+        out['liga'] = nomeFinal;
+        out['liga_nome'] = nomeFinal;
+        out['campeonato'] = nomeFinal;
+        out['league_name'] = nomeFinal;
+      }
+      // 3) Campo `league` SEMPRE como MAP compatível (L816 e L1493 do
+      //    flashscore_home_screen esperam Map<String, dynamic>).
+      //    Se liga veio como string (ou já foi achatada), recompõe o objeto.
+      out['league'] = _extrairLigaComoMap(
+        out['league'] is Map || out['liga'] is Map
+            ? (out['league'] ?? out['liga'])
+            : nomeFinal,
+        fallbackName: nomeFinal,
+      );
+      return out;
+    }).toList(growable: false);
+  }
+
   /// Base RESOLVIDA (usa cache). Chame [resolveBaseUrl] antes das requisições
   /// ou use [baseUrlAuto] getter.
   static String get baseUrl => BackendConfig.baseV1;
@@ -125,23 +192,53 @@ class ApiService {
   /// Helper: resolve V1 (dispara fallback chain se necessário). Retorna SEMPRE
   /// uma String válida (pior caso = default IP LAN). Pode ser usado em await
   /// dentro de TODAS as funções de request para garantir Render primeiro.
+  ///
+  /// Se houver cache VÁLIDO, faz um PING RÁPIDO (800ms) para confirmar que o
+  /// backend ainda está acessível (ex: usuário mudou de Wi-Fi → 5G). Se não
+  /// responder, invalida o cache e roda a re-detecção completa.
   static Future<String> _v1() async {
-    if (BackendConfig.temCacheValido) return BackendConfig.cachedBaseV1;
+    if (BackendConfig.temCacheValido) {
+      if (await _cacheAindaValido()) return BackendConfig.cachedBaseV1;
+      BackendConfig.invalidarCache();
+    }
     return resolveV1();
   }
 
   /// Helper: resolve V3, fallback igual ao _v1().
   static Future<String> _v3() async {
-    if (BackendConfig.temCacheValido) return BackendConfig.cachedBaseV3;
+    if (BackendConfig.temCacheValido) {
+      if (await _cacheAindaValido()) return BackendConfig.cachedBaseV3;
+      BackendConfig.invalidarCache();
+    }
     return resolveV3();
+  }
+
+  /// Ping rápido para validar se o backend em cache ainda responde.
+  /// Evita problema do usuário mudar de Wi-Fi (LAN) para 5G e ficar travado
+  /// com IP local que não existe mais na nova rede.
+  static Future<bool> _cacheAindaValido() async {
+    final String root = BackendConfig.cachedBaseRoot;
+    if (root.isEmpty) return false;
+    try {
+      final http.Response r = await http
+          .get(Uri.parse('$root/ping'))
+          .timeout(const Duration(milliseconds: 800));
+      return r.statusCode == 200 &&
+          r.body.trim().toLowerCase().replaceAll('"', '') == 'pong';
+    } catch (_) {
+      return false;
+    }
   }
 
   /// Resolve automaticamente o melhor backend disponível (RODA NOBOOT).
   /// Retorna o BASE ROOT encontrado (ex: https://tiago-ia-backend.onrender.com
   /// ou http://192.168.1.42:8000) — ou String vazia se nenhum responder.
+  ///
+  /// Timeouts diferenciados:
+  /// - Render (nuvem): até 45s para cold start (acorda instância dormindo)
+  /// - LAN / localhost: 1.8s cada (rede local é rápida)
   static Future<String> resolveBaseUrl({
     bool forcarRedeteccao = false,
-    Duration timeoutPorCandidato = const Duration(milliseconds: 1600),
   }) async {
     if (!forcarRedeteccao && BackendConfig.temCacheValido) {
       return BackendConfig.cachedBaseRoot;
@@ -149,7 +246,11 @@ class ApiService {
     if (forcarRedeteccao) BackendConfig.invalidarCache();
 
     String primeiroQueFuncionou = '';
+    int idx = 0;
     for (final String root in BackendConfig.candidatosBaseRoot) {
+      final Duration timeoutPorCandidato = idx == 0
+          ? const Duration(seconds: 45)
+          : const Duration(milliseconds: 1800);
       try {
         final http.Response r = await http
             .get(Uri.parse('$root/ping'))
@@ -161,6 +262,7 @@ class ApiService {
           return primeiroQueFuncionou;
         }
       } catch (_) {}
+      idx++;
     }
     return primeiroQueFuncionou;
   }
@@ -1746,7 +1848,7 @@ class ApiService {
     bool usarGemini = false,
     bool apenasHojeLive = true,
     bool forceRefresh = false,
-    Duration timeout = const Duration(seconds: 12),
+    Duration timeout = const Duration(seconds: 45),
   }) async {
     final List<String> queries = <String>[
       'usar_gemini=$usarGemini',
@@ -1796,7 +1898,7 @@ class ApiService {
           'totais': totais,
           'total': total,
           'generated_at': generatedAt ?? DateTime.now().toIso8601String(),
-          'sinais': sinais,
+          'sinais': _normalizarListaSinais(sinais),
           'http_status': 200,
           'cache_hit': false,
           'api_failed': false,
@@ -1835,6 +1937,10 @@ class ApiService {
       out['api_failed'] = true;
       out['erro_detalhe'] = erroDetalhe;
       out['aviso'] = 'API fora temporariamente · usando cache do dia';
+      out['sinais'] = _normalizarListaSinais(
+        List<Map<String, dynamic>>.from(
+            out['sinais'] as List<dynamic>? ?? <Map<String, dynamic>>[]),
+      );
       debugPrint(
           '[ApiService] getIaSinais CACHE FALLBACK · total=${out['total']}');
       return out;

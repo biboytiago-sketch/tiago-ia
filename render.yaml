@@ -50,3 +50,23 @@ services:
         sync: false
       - key: API_FOOTBALL_KEY
         sync: false
+
+staticSites:
+  # ============================================================
+  # Frontend Flutter Web (acessível de QUALQUER celular, 5G/4G)
+  # Build: baixa o Flutter SDK, roda `flutter build web --release`
+  # Publica: ./frontend_flutter/build/web
+  # ============================================================
+  - name: tiago-frontend
+    region: sao-paulo
+    plan: starter
+    buildCommand: "chmod +x ./scripts/build_flutter_web_render.sh && ./scripts/build_flutter_web_render.sh"
+    publishDir: "./frontend_flutter/build/web"
+    # SPA (Single Page App) Flutter: qualquer rota (ex: /home, /tickets)
+    # cai no index.html para o Flutter Router carregar a tela certa.
+    routes:
+      - type: rewrite
+        source: "/*"
+        destination: "/index.html"
+    autoDeploy: yes
+

@@ -1,5 +1,7 @@
 import os
 import json
+import threading
+import time
 from datetime import datetime, date, timedelta
 from typing import List, Optional, Dict, Any
 
@@ -288,6 +290,38 @@ def startup_event():
         print("Banco de dados inicializado com sucesso.")
     except Exception as e:
         print(f"Erro ao inicializar banco: {e}")
+
+    # ── WARMUP: pré-aquece cache /api/v1/ia/sinais em THREAD DAEMON ──
+    # Não bloqueia startup (health check /ping 3s do Render sobrevive),
+    # porém garante que ~5s após subir o cache já está populado e a
+    # 1ª chamada do Flutter retorna em <100ms (não cai no timeout 12→45s).
+    def _warmup_ia_sinais_bg():
+        try:
+            time.sleep(4)  # espera health check passar primeiro
+            t0 = time.time()
+            res = calcular_sinais_ia(
+                usar_gemini=False,
+                apenas_hoje_ou_live=True,
+            )
+            total = 0
+            if isinstance(res, dict):
+                total = res.get("total") or len(res.get("sinais", []) or [])
+            elif isinstance(res, list):
+                total = len(res)
+            dt = (time.time()-t0)*1000
+            print(f"[warmup] cache SINAIS-IA OK ({total} jogos · {dt:.0f} ms)")
+        except Exception as ex:
+            print(f"[warmup] cache SINAIS-IA falhou (não crítico): {ex}")
+
+    try:
+        threading.Thread(
+            target=_warmup_ia_sinais_bg,
+            daemon=True,
+            name="warmup-ia-sinais",
+        ).start()
+        print("[startup] Warmup IA/sinais agendado (thread background).")
+    except Exception as e:
+        print(f"[startup] não foi possível agendar warmup: {e}")
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1329,8 +1363,13 @@ def ia_sinais_list(
                 or (away_obj.get("name") if isinstance(away_obj, dict) else None)
                 or "Fora"
             )
+            nome_liga = s.get("liga")
+            if isinstance(nome_liga, dict):
+                nome_liga = str(nome_liga.get("name") or nome_liga.get("nome") or str(nome_liga))
+            elif isinstance(nome_liga, (list, tuple, set)):
+                nome_liga = str(nome_liga)
             nome_liga = str(
-                s.get("liga") or s.get("liga_nome") or s.get("league")
+                nome_liga or s.get("liga_nome") or s.get("league")
                 or s.get("league_name") or s.get("campeonato")
                 or (league_obj.get("name") if isinstance(league_obj, dict) else None)
                 or "Amistoso"

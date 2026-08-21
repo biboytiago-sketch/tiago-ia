@@ -1,0 +1,66 @@
+node_modules
+build
+dist
+.git
+.trae
+.log
+.figma
+
+# ===== BACKEND PYTHON =====
+__pycache__/
+*.py[cod]
+backend/.venv/
+backend/venv/
+backend/env/
+backend/build/
+backend/dist/
+*.egg-info/
+backend/tiago_ia.db
+backend/*.db
+backend/*.log
+backend/_debug_*.py
+backend/_t_*.py
+backend/.env
+
+# ===== FRONTEND FLUTTER (pesado) =====
+.dart_tool/
+.pub-cache/
+frontend_flutter/.dart_tool/
+frontend_flutter/.pub-cache/
+frontend_flutter/build/
+frontend_flutter/.gradle_local/
+frontend_flutter/android/.gradle/
+frontend_flutter/android/app/.cxx/
+frontend_flutter/android/app/build/
+frontend_flutter/android/build/
+frontend_flutter/ios/Pods/
+frontend_flutter/linux/flutter/ephemeral/
+frontend_flutter/macos/Flutter/ephemeral/
+frontend_flutter/windows/flutter/ephemeral/
+frontend_flutter/ios/Runner.xcodeproj/project.xcworkspace/xcuserdata/
+frontend_flutter/ios/Runner.xcodeproj/xcuserdata/
+
+# ===== MISC =====
+*.apk
+*.aab
+*.symbols
+*.so
+*.db
+*.log
+.DS_Store
+Thumbs.db
+.env
+.env.*
+tiago_ia.db
+lib/
+# Setup do Flutter na raiz (nao existe, mas evita falso positivo)
+pubspec.yaml
+pubspec.lock
+run_app.bat
+
+# Arquivos temporarios do debug local
+analisa_*.py
+*_render.json
+main_check.js
+sinais_*.json
+bilhetes_*.json

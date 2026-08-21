@@ -21,8 +21,13 @@ class BackendConfig {
 
   // Lista ORDENADA de todos os backends possíveis (Render + LAN + emulador)
   // ApiService testa em ordem e trava no primeiro que responder /ping = "pong"
+  // =======================================================================
+  // =======================================================================
+  // ESTRATÉGIA 5G / 4G / REDE EXTERNA: RENDER NUVEM PRIMEIRO (sempre acessível)
+  // Fallback para LAN apenas se Render estiver indisponível e usuário no Wi-Fi local.
+  // =======================================================================
   static final List<String> candidatosBaseRoot = <String>[
-    _baseRender, // 1º Prioridade: Render (oficial)
+    _baseRender, // 1º: Render (oficial, funciona em 5G / 4G / qualquer rede)
     'http://192.168.1.42:$_porta', // IP atual (detectado 2026-08-19)
     'http://192.168.1.35:$_porta', // IP antigo (ainda válido se IP fixo)
     'http://192.168.1.30:$_porta', // Range comum roteadores Intelbras/Tenda
@@ -31,8 +36,8 @@ class BackendConfig {
     'http://192.168.0.100:$_porta',
     'http://10.0.0.10:$_porta',
     'http://10.0.0.100:$_porta',
-    'http://127.0.0.1:$_porta', // Fallback localhost
     'http://10.0.2.2:$_porta', // Android Emulator bridge -> 127.0.0.1
+    'http://127.0.0.1:$_porta', // Último: localhost (apenas desenvolvimento PC)
   ];
 
   // Builda os prefixos de API a partir de um ROOT descoberto
@@ -49,7 +54,7 @@ class BackendConfig {
   }
 
   static void cachearBaseRoot(String root,
-      {Duration validoPor = const Duration(hours: 6)}) {
+      {Duration validoPor = const Duration(minutes: 15)}) {
     _cachedBaseRoot = root;
     _cacheExpiraEm = DateTime.now().add(validoPor);
   }
@@ -73,8 +78,12 @@ class BackendConfig {
   // ============================================================
   static const String _ipLocal = '192.168.1.42';
   static const String _baseLocal = 'http://$_ipLocal:$_porta';
-  static const String _base =
-      _baseRender; // 🟢 MUDANCA CRITICA: DEFAULT = RENDER (nuvem), nao mais IP LAN!
+  // =======================================================================
+  // DEFAULT: RENDER NUVEM — funciona em 5G / 4G / qualquer rede externa.
+  // ApiService.resolveBaseUrl() ainda faz health-check e pode escolher LAN
+  // se o usuário estiver no mesmo Wi-Fi do backend local.
+  // =======================================================================
+  static const String _base = _baseRender;
 
   static const String baseRoot = _base;
   static const String baseV1 = '$_base/api/v1';
@@ -138,5 +147,31 @@ class BackendConfig {
       }
     }
     return fallback;
+  }
+
+  /// Extrai um objeto LIGA compatível com flashscore_home_screen
+  /// (`{id, name, country, flag}`) a partir de `value`, que pode chegar tanto
+  /// como Map (estrutura normalizada de API-Football) quanto como STRING plana
+  /// (ex: "Championship", "Brasileirão Série A") — no caso de string, monta um
+  /// Map sintético para NÃO crashar em casts como `s['league'] as Map`.
+  static Map<String, dynamic> safeLeagueMap(dynamic value,
+      {String fallbackName = ''}) {
+    if (value is Map) {
+      return Map<String, dynamic>.from(value);
+    }
+    String? nome;
+    if (value is String && value.isNotEmpty) {
+      nome = value;
+    } else {
+      final String nomeLiga = safeString(value);
+      if (nomeLiga.isNotEmpty) nome = nomeLiga;
+    }
+    nome ??= (fallbackName.isEmpty ? null : fallbackName);
+    return <String, dynamic>{
+      'id': 0,
+      'name': nome ?? '',
+      'country': '',
+      'flag': '',
+    };
   }
 }

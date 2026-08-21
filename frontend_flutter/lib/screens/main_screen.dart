@@ -392,7 +392,7 @@ class _MainScreenState extends State<MainScreen> {
       final List<Map<String, dynamic>> verdesAltos = novos
           .where((Map<String, dynamic> s) =>
               s['sinal'] == 'apostar' &&
-              BackendConfig.safeInt(s['confianca']) >= 72)
+              BackendConfig.safeInt(s['confianca']) >= 55)
           .toList(growable: false);
       if (verdesAltos.isNotEmpty) {
         for (final Map<String, dynamic> s in verdesAltos) {

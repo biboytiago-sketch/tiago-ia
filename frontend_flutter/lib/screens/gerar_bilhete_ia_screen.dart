@@ -2,10 +2,14 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
+import 'package:url_launcher/url_launcher.dart';
 
 import '../core/backend_config.dart';
+import '../core/bookmaker_registry.dart';
 import '../services/api_service.dart';
+import '../services/bet_export_engine.dart';
 import '../theme/app_theme.dart';
 
 class GerarBilheteIAScreen extends StatefulWidget {
@@ -326,21 +330,57 @@ class _GerarBilheteIAScreenState extends State<GerarBilheteIAScreen>
                       ),
                   ],
                   const SizedBox(height: 22),
-                  SizedBox(
-                    width: double.infinity,
-                    height: 52,
-                    child: ElevatedButton(
-                      onPressed: () => Navigator.of(ctx).pop(),
-                      style: ElevatedButton.styleFrom(
-                          backgroundColor: cor,
-                          shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(14))),
-                      child: const Text('CONFIRMAR BILHETE NO BOOKMAKER',
-                          style: TextStyle(
-                              color: Colors.white,
-                              fontWeight: FontWeight.w800,
-                              fontSize: 13)),
-                    ),
+                  Row(
+                    children: <Widget>[
+                      Expanded(
+                        child: SizedBox(
+                          height: 52,
+                          child: ElevatedButton.icon(
+                            onPressed: () {
+                              Navigator.of(ctx).pop();
+                              _copiarSomenteBilhete();
+                            },
+                            style: ElevatedButton.styleFrom(
+                                backgroundColor: AppTheme.flashCard,
+                                foregroundColor: AppTheme.yellow,
+                                side: const BorderSide(
+                                    color: AppTheme.yellow, width: 1.4),
+                                shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(14))),
+                            icon: const Icon(Icons.copy_all_rounded, size: 18),
+                            label: const Text('COPIAR BILHETE',
+                                style: TextStyle(
+                                    color: AppTheme.yellow,
+                                    fontWeight: FontWeight.w800,
+                                    fontSize: 12.5)),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        flex: 2,
+                        child: SizedBox(
+                          height: 52,
+                          child: ElevatedButton.icon(
+                            onPressed: () {
+                              Navigator.of(ctx).pop();
+                              _abrirSeletorCasas();
+                            },
+                            style: ElevatedButton.styleFrom(
+                                backgroundColor: cor,
+                                shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(14))),
+                            icon: const Icon(Icons.rocket_launch_rounded,
+                                size: 18, color: Colors.white),
+                            label: const Text('🚀 APOSTAR NO APP',
+                                style: TextStyle(
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.w800,
+                                    fontSize: 13)),
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
                   const SizedBox(height: 10),
                 ],
@@ -477,6 +517,307 @@ class _GerarBilheteIAScreenState extends State<GerarBilheteIAScreen>
       if (_selecionadas.contains(id)) c++;
     }
     return c;
+  }
+
+  BilhetePronto? _montarBilheteExport() {
+    final Map<String, dynamic>? b = _bilheteAtual();
+    if (b == null) return null;
+    final String perfil = BackendConfig.safeString(b['perfil']);
+    final List<dynamic> selecoesRaw = BackendConfig.safeList(b['selecoes']);
+    final Map<String, dynamic> validacao =
+        _validacaoPorPerfil[perfil] ?? BackendConfig.safeMap(b['validacao']);
+    final double oddsTotais = BackendConfig.safeDouble(
+        validacao['odds_acumulada'] ?? b['odds_acumulada_ia'] ?? 1.0);
+    final double stake = BackendConfig.safeDouble(
+        validacao['stake_recomendado_pct'] ??
+            b['stake_recomendado_padrao'] ??
+            100.0);
+    final double stakeBRL = (stake > 1 && stake < 50)
+        ? stake * 1.0
+        : (stake > 50 && stake <= 100)
+            ? stake
+            : (stake * 0.0).clamp(10, 100);
+    final double stakeReal = stakeBRL < 5 ? 100 : stakeBRL;
+    final double? ret = validacao['retorno_potencial'] != null
+        ? BackendConfig.safeDouble(validacao['retorno_potencial'])
+        : b['retorno_potencial_exemplo_100'] != null
+            ? BackendConfig.safeDouble(b['retorno_potencial_exemplo_100'])
+            : null;
+    final String risco = BackendConfig.safeString(
+        validacao['risco_geral'] ?? b['risco_geral'] ?? '');
+    final DateTime data = DateTime.now();
+    final List<SelecaoBilhete> list = <SelecaoBilhete>[];
+    int idx = 1;
+    for (final dynamic s in selecoesRaw) {
+      final Map<String, dynamic> sm = BackendConfig.safeMap(s);
+      final Map<String, dynamic> sel =
+          BackendConfig.safeMap(sm['selecao_escolhida']);
+      final String id = '${perfil}_${sm['fixture_id']}_${sel['mercado']}';
+      if (!_selecionadas.contains(id)) continue;
+      list.add((
+        numero: idx++,
+        timeCasa: BackendConfig.safeString(sm['time_casa']),
+        timeFora: BackendConfig.safeString(sm['time_fora']),
+        mercado: BackendConfig.safeString(sel['label']).isEmpty
+            ? BackendConfig.safeString(sel['mercado'])
+            : BackendConfig.safeString(sel['label']) +
+                (sel['linha'] != null && sel['linha'].toString().isNotEmpty
+                    ? ' (Linha ${sel['linha']})'
+                    : ''),
+        odd: BackendConfig.safeDouble(sel['odd_alvo']),
+        liga: sm['liga']?.toString(),
+        horario: sm['horario_br']?.toString(),
+      ));
+    }
+    if (list.isEmpty) return null;
+    return (
+      data: data,
+      selecoes: list,
+      oddsTotais: oddsTotais < 1.01 ? 1.01 : oddsTotais,
+      stakeBRL: stakeReal < 1 ? 50 : stakeReal,
+      retornoPotencialBRL: ret,
+      perfil: perfil,
+      risco: risco.isEmpty ? null : risco,
+    );
+  }
+
+  Future<void> _copiarSomenteBilhete() async {
+    final BilhetePronto? bilhete = _montarBilheteExport();
+    if (bilhete == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+            backgroundColor: Color(0xFFFF3B30),
+            content: Text('Selecione pelo menos 1 jogada para exportar.',
+                style: TextStyle(color: Colors.white))),
+      );
+      return;
+    }
+    final String texto = BetExportEngine.formatarBilheteTexto(bilhete);
+    await BetExportEngine.copiarParaClipboard(texto);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+          backgroundColor: Color(0xFF1FB453),
+          duration: Duration(seconds: 3),
+          content: Row(
+            children: <Widget>[
+              Icon(Icons.check_circle, color: Colors.white),
+              SizedBox(width: 10),
+              Flexible(
+                  child: Text(
+                      '📋 Bilhete copiado! Já pode colar no grupo do Telegram / WhatsApp.',
+                      style: TextStyle(color: Colors.white))),
+            ],
+          )),
+    );
+  }
+
+  Future<void> _exportarEAbrirCasa(BookmakerConfig casa) async {
+    final BilhetePronto? bilhete = _montarBilheteExport();
+    if (bilhete == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+            backgroundColor: Color(0xFFFF3B30),
+            content: Text('Selecione jogadas no bilhete antes de exportar.',
+                style: TextStyle(color: Colors.white))),
+      );
+      return;
+    }
+    final String texto = BetExportEngine.formatarBilheteTexto(bilhete);
+    await BetExportEngine.copiarParaClipboard(texto);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+          backgroundColor: casa.accentColor,
+          duration: const Duration(seconds: 4),
+          content: Row(
+            children: <Widget>[
+              const Icon(Icons.copy_all, color: Colors.white, size: 18),
+              const SizedBox(width: 10),
+              Flexible(
+                  child: Text(
+                      '📋 Bilhete copiado! Abrindo ${casa.name} para você fazer login...',
+                      style: const TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w700,
+                          height: 1.3))),
+            ],
+          )),
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 650));
+    await BetExportEngine.abrirCasaDeApostas(casa);
+  }
+
+  void _abrirSeletorCasas() {
+    final BilhetePronto? tmp = _montarBilheteExport();
+    if (tmp == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+            backgroundColor: Color(0xFFFF3B30),
+            content: Text('Selecione ao menos 1 jogada no bilhete primeiro.',
+                style: TextStyle(color: Colors.white))),
+      );
+      return;
+    }
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF0A1418),
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(22))),
+      builder: (BuildContext ctx) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(18, 10, 18, 20),
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Center(
+                    child: Container(
+                      width: 54,
+                      height: 5,
+                      decoration: BoxDecoration(
+                          color: AppTheme.flashLine,
+                          borderRadius: BorderRadius.circular(5)),
+                    ),
+                  ),
+                  const SizedBox(height: 14),
+                  Row(
+                    children: <Widget>[
+                      Container(
+                          padding: const EdgeInsets.all(10),
+                          decoration: BoxDecoration(
+                              color: AppTheme.yellow.withOpacity(0.12),
+                              borderRadius: BorderRadius.circular(12)),
+                          child: const Icon(Icons.rocket_launch_rounded,
+                              color: AppTheme.yellow)),
+                      const SizedBox(width: 12),
+                      const Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: <Widget>[
+                            Text('🚀 Apostar no App / Web',
+                                style: TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 17,
+                                    fontWeight: FontWeight.w800)),
+                            SizedBox(height: 3),
+                            Text(
+                                'Escolha a casa. O bilhete é copiado automaticamente.',
+                                style: TextStyle(
+                                    color: AppTheme.flashSub, fontSize: 11.5)),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 18),
+                  GridView.builder(
+                    physics: const NeverScrollableScrollPhysics(),
+                    shrinkWrap: true,
+                    gridDelegate:
+                        const SliverGridDelegateWithFixedCrossAxisCount(
+                      crossAxisCount: 2,
+                      mainAxisSpacing: 10,
+                      crossAxisSpacing: 10,
+                      childAspectRatio: 2.25,
+                    ),
+                    itemCount: SUPPORTED_BOOKMAKERS.length,
+                    itemBuilder: (_, int i) {
+                      final BookmakerConfig casa = SUPPORTED_BOOKMAKERS[i];
+                      return Material(
+                        color: Colors.transparent,
+                        child: InkWell(
+                          splashColor: casa.accentColor.withOpacity(0.25),
+                          highlightColor: casa.accentColor.withOpacity(0.1),
+                          onTap: () {
+                            Navigator.of(ctx).pop();
+                            _exportarEAbrirCasa(casa);
+                          },
+                          borderRadius: BorderRadius.circular(14),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 12),
+                            decoration: BoxDecoration(
+                                color: AppTheme.flashCard,
+                                borderRadius: BorderRadius.circular(14),
+                                border: Border.all(
+                                    color: casa.accentColor.withOpacity(0.65),
+                                    width: 1.2)),
+                            child: Row(
+                              children: <Widget>[
+                                Container(
+                                  width: 36,
+                                  height: 36,
+                                  decoration: BoxDecoration(
+                                      color: casa.accentColor.withOpacity(0.14),
+                                      borderRadius: BorderRadius.circular(10)),
+                                  child: Icon(casa.icon,
+                                      color: casa.accentColor, size: 20),
+                                ),
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    children: <Widget>[
+                                      Text(casa.name,
+                                          style: const TextStyle(
+                                              color: Colors.white,
+                                              fontSize: 13.5,
+                                              fontWeight: FontWeight.w800)),
+                                      const SizedBox(height: 2),
+                                      Text(
+                                          casa.supportsDirectCouponImport
+                                              ? 'Importa cupom'
+                                              : 'Link Web / App',
+                                          style: const TextStyle(
+                                              color: AppTheme.flashSub,
+                                              fontSize: 10.5)),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                  const SizedBox(height: 16),
+                  SizedBox(
+                    width: double.infinity,
+                    height: 48,
+                    child: OutlinedButton.icon(
+                      onPressed: () {
+                        Navigator.of(ctx).pop();
+                        _copiarSomenteBilhete();
+                      },
+                      style: OutlinedButton.styleFrom(
+                          side: const BorderSide(
+                              color: AppTheme.flashLine, width: 1.3),
+                          shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(13))),
+                      icon: const Icon(Icons.copy_all_rounded,
+                          color: AppTheme.flashSub, size: 18),
+                      label: const Text(
+                          'Apenas Copiar Bilhete (para WhatsApp / Telegram)',
+                          style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 12.5,
+                              fontWeight: FontWeight.w700)),
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
   }
 
   Widget _erroTela() {

@@ -465,8 +465,7 @@ class _FlashScoreHomeScreenState extends State<FlashScoreHomeScreen> {
         <String, Map<String, dynamic>>{};
     for (final dynamic p in _partidas) {
       final Map<String, dynamic> m = p as Map<String, dynamic>;
-      final Map<String, dynamic> lg =
-          m['league'] as Map<String, dynamic>? ?? <String, dynamic>{};
+      final Map<String, dynamic> lg = BackendConfig.safeLeagueMap(m['league']);
       final String nome = lg['name']?.toString() ?? 'Outros';
       final String chave = '${lg['country']?.toString() ?? ''}_$nome';
       final Map<String, dynamic> slot = grupos.putIfAbsent(
@@ -814,27 +813,30 @@ class _IaSinaisSheet extends StatelessWidget {
                                 final Color cor = sinalCor(ss);
                                 final int pct = (s['confianca'] as int?) ?? 50;
                                 final Map<String, dynamic> liga =
-                                    (s['league'] as Map<String, dynamic>? ??
-                                        <String, dynamic>{});
+                                    BackendConfig.safeLeagueMap(s['league']);
                                 final Map<String, dynamic> teams =
-                                    (s['teams'] as Map<String, dynamic>? ??
-                                        <String, dynamic>{});
-                                final String home = (((teams['home']
-                                            as Map<String, dynamic>?)?['name'])
+                                    BackendConfig.safeMap(s['teams']);
+                                final String home = (((teams['home'] is Map)
+                                            ? (teams['home'] as Map)['name']
+                                            : null)
                                         ?.toString()) ??
-                                    'Casa';
-                                final String away = (((teams['away']
-                                            as Map<String, dynamic>?)?['name'])
+                                    (BackendConfig.safeString(s['home']).isEmpty
+                                        ? 'Casa'
+                                        : BackendConfig.safeString(s['home']));
+                                final String away = (((teams['away'] is Map)
+                                            ? (teams['away'] as Map)['name']
+                                            : null)
                                         ?.toString()) ??
-                                    'Fora';
+                                    (BackendConfig.safeString(s['away']).isEmpty
+                                        ? 'Fora'
+                                        : BackendConfig.safeString(s['away']));
                                 final String flag =
                                     liga['flag']?.toString() ?? '';
                                 final String ligaNome =
-                                    liga['name']?.toString() ?? '';
+                                    liga['name']?.toString() ??
+                                        BackendConfig.safeString(s['liga']);
                                 final Map<String, dynamic> odd =
-                                    (s['odd_sugerida']
-                                            as Map<String, dynamic>? ??
-                                        <String, dynamic>{});
+                                    BackendConfig.safeMap(s['odd_sugerida']);
                                 final List<String> razoes = List<String>.from(
                                     s['razoes'] as List<dynamic>? ??
                                         <dynamic>[]);
@@ -1490,7 +1492,7 @@ class _CorpoLista extends StatelessWidget {
       itemBuilder: (BuildContext c, int i) {
         final Map<String, dynamic> g = grupos[i];
         final Map<String, dynamic> liga =
-            g['league'] as Map<String, dynamic>? ?? <String, dynamic>{};
+            BackendConfig.safeLeagueMap(g['league']);
         List<Map<String, dynamic>> partidas =
             (g['partidas'] as List<dynamic>?)?.cast<Map<String, dynamic>>() ??
                 <Map<String, dynamic>>[];

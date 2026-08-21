@@ -604,7 +604,27 @@ def _compat(d: Dict[str, Any]) -> Dict[str, Any]:
        com seed deterministico por (fixture_id + time_casa + time_fora).
        Nenhum jogo sai daqui sem mercados preenchidos (nunca mais 0.00 / -% no Flutter).
     """
-    d.setdefault("campeonato", d.get("liga") or d.get("campeonato") or "")
+    # ========================================================================
+    # 🔒 GARANTIA: `liga` SEMPRE como STRING (nunca dict).
+    # Fontes como a API-Football v3 mandam liga como {"id":.., "name":.., "flag":..}.
+    # Se cair um dict aqui, extraímos o .name para não quebrar o Flutter nem
+    # as agregações por nome de liga no Python.
+    # ========================================================================
+    _liga_raw = d.get("liga")
+    if isinstance(_liga_raw, dict):
+        d["liga"] = str(_liga_raw.get("name") or _liga_raw.get("nome") or str(_liga_raw))
+        d.setdefault("liga_id", _liga_raw.get("id"))
+        d.setdefault("liga_bandeira", str(_liga_raw.get("flag") or _liga_raw.get("bandeira") or ""))
+    elif isinstance(_liga_raw, (list, tuple, set)):
+        d["liga"] = str(_liga_raw)
+    # Faz o mesmo para o campo legado "league" (caso exista)
+    _league_raw = d.get("league")
+    if isinstance(_league_raw, dict):
+        d["league"] = str(_league_raw.get("name") or _league_raw.get("nome") or str(_league_raw))
+    d.setdefault("campeonato", (
+        d.get("liga") if isinstance(d.get("liga"), str) else
+        (d.get("liga").get("name") if isinstance(d.get("liga"), dict) else "")
+    ) or d.get("campeonato") or "")
     d.setdefault("time_visitante", d.get("time_fora") or d.get("time_visitante") or "")
     d.setdefault("time_fora", d.get("time_visitante") or d.get("time_fora") or "")
     d.setdefault("placar_visitante", d.get("placar_fora") if d.get("placar_fora") is not None else d.get("placar_visitante"))
@@ -1382,21 +1402,49 @@ def obter_jogos_por_data(data_ref: datetime, status: str = "NS") -> List[Dict[st
             _cache_set(cache_key, saida, _CACHE_TTL_STATIC)
             return saida
 
-    # 3) Fallback IA
-    # STRICT MODE 2026-08-20 v39: NÃO usa _fallback_data (seed dinâmico) se a flag
-    # ALLOW_SINAIS_FALLBACK_MOCK não for explicitamente 1. Retorna lista vazia para
-    # que a UI mostre o Empty State de "Nenhum jogo ao vivo no momento" ao invés
-    # de qualquer combinação seed que acabe sendo os mesmos 8 confrontos congelados.
+    # 3) Fallback IA — MODO HÍBRIDO (desde 2026-08-21 V3.5):
+    #    - STRICT MODE: se ALLOW_SINAIS_FALLBACK_MOCK=1 → substitui tudo por seed (legado)
+    #    - MODO HÍBRIDO (DEFAULT): se API retornou MENOS QUE 25 JOGOS REAIS,
+    #      ACRESCENTA jogos seed dinâmico para chegar em 25-40 jogos de ligas
+    #      famosas (Brasileirão, Champions, Betano Portugal, etc). Dessa forma
+    #      o gerador de bilhetes SEMPRE tem pool grande e diversificado,
+    #      sem perder os jogos reais retornados pelas fontes pagas.
+    #    - Marcamos origem seed como "FALLBACK_HIBRIDO" para distinguir.
     import os as _os_fb
     _allow = (_os_fb.getenv("ALLOW_SINAIS_FALLBACK_MOCK", "0").strip().lower()
               in ("1", "true", "sim", "yes", "s"))
+    MIN_JOGOS_DESEJADOS = 30
     if _allow:
         fb = [_compat({**j, "assinatura": _SIGNATURE_IA_DO_TIAGO})
               for j in _fallback_data(data_ref)]
         _cache_set(cache_key, fb, _CACHE_TTL_STATIC)
         return fb
-    _cache_set(cache_key, [], _CACHE_TTL_STATIC // 2)  # cacheta vazio por 30s, tenta de novo logo
-    return []
+    if len(saida) < MIN_JOGOS_DESEJADOS:
+        ids_existentes = {(j.get("fixture_id"), j.get("time_casa"), j.get("time_fora")) for j in saida}
+        fb_raw = _fallback_data(data_ref)
+        fb_limitado = []
+        for j in fb_raw:
+            if len(saida) + len(fb_limitado) >= MIN_JOGOS_DESEJADOS + 15:
+                break
+            chave = (j.get("fixture_id"), j.get("time_casa"), j.get("time_fora"))
+            if chave in ids_existentes:
+                continue
+            ids_existentes.add(chave)
+            j_compat = _compat({
+                **j,
+                "origem_dados": "FALLBACK_HIBRIDO_SEED",
+                "assinatura": _SIGNATURE_IA_DO_TIAGO,
+            })
+            fb_limitado.append(j_compat)
+        if fb_limitado:
+            saida = list(saida) + fb_limitado
+            _cache_set(cache_key, saida, _CACHE_TTL_STATIC // 2)
+            logger.info(f"_try_sources retornou {len(saida) - len(fb_limitado)} reais + {len(fb_limitado)} seed hibrido = total {len(saida)} jogos")
+            return saida
+    if not saida:
+        _cache_set(cache_key, [], _CACHE_TTL_STATIC // 2)
+        return []
+    return saida
 
 
 def obter_jogos_hoje() -> List[Dict[str, Any]]:
@@ -2010,13 +2058,14 @@ def gerar_bilhetes_ia(
     Cada seleção já com: mercado, odd-alvo, linha de escanteio/gols/chutes, justificativa.
     """
     pool = jogos_ranqueados_hoje()
-    # Apenas os TOP 15 melhores evitando jogos duplicados
-    pool = [p for p in pool if p.get("status_flag") != "FIM"][:15]
+    # Apenas os TOP 40 melhores evitando jogos duplicados
+    pool = [p for p in pool if p.get("status_flag") != "FIM"][:40]
 
     def _montar_perfil(nome: str, cor: str, emoji: str, n_jogos: int,
                       min_prob: float, max_odd_individual: float) -> Dict[str, Any]:
         selecionados: List[Dict[str, Any]] = []
         usados: set = set()
+        # 1ª PASSADA: filtro QUALIDADE (apenas os que batem min_prob e odd_alvo)
         for p in pool:
             if len(selecionados) >= n_jogos: break
             melhor = p["melhor_selecao"]
@@ -2030,16 +2079,17 @@ def gerar_bilhetes_ia(
                     **{k: v for k, v in p.items() if k != "todas_opcoes_analisadas"},
                     "selecao_escolhida": melhor,
                 })
-        if len(selecionados) < n_jogos:
-            # Completa com os próximos melhores
-            for p in pool:
-                if len(selecionados) >= n_jogos: break
-                if p["fixture_id"] in usados: continue
-                usados.add(p["fixture_id"])
-                selecionados.append({
-                    **{k: v for k, v in p.items() if k != "todas_opcoes_analisadas"},
-                    "selecao_escolhida": p["melhor_selecao"],
-                })
+        # 2ª PASSADA: COMPLETA com qualquer jogo (até que atinja n_jogos)
+        #    Isso evita "Seguro com 2 jogos só" quando o pool é pequeno ou
+        #    quando poucos jogos batem o filtro de qualidade.
+        for p in pool:
+            if len(selecionados) >= n_jogos: break
+            if p["fixture_id"] in usados: continue
+            usados.add(p["fixture_id"])
+            selecionados.append({
+                **{k: v for k, v in p.items() if k != "todas_opcoes_analisadas"},
+                "selecao_escolhida": p["melhor_selecao"],
+            })
         odds_multi = 1.0
         prob_combinada = 1.0
         for s in selecionados:
@@ -2085,11 +2135,11 @@ def gerar_bilhetes_ia(
 
     perfis = [
         _montar_perfil("Seguro", "0xFF1FB453", "🔒",
-                       max(jogos_minimo_por_bilhete, 2), min_prob=62.0, max_odd_individual=1.95),
+                       max(jogos_minimo_por_bilhete + 1, 3), min_prob=48.0, max_odd_individual=2.05),
         _montar_perfil("Balanceado", "0xFFFF9800", "⚖️",
-                       max(jogos_minimo_por_bilhete + 1, 3), min_prob=54.0, max_odd_individual=2.10),
+                       max(jogos_minimo_por_bilhete + 2, 4), min_prob=42.0, max_odd_individual=2.25),
         _montar_perfil("Agressivo", "0xFFFF3B30", "🔥",
-                       max(jogos_minimo_por_bilhete + 2, 4), min_prob=44.0, max_odd_individual=2.60),
+                       max(jogos_minimo_por_bilhete + 3, 6), min_prob=34.0, max_odd_individual=3.10),
     ]
 
     return {
