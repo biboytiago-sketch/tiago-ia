@@ -57,7 +57,6 @@ Thumbs.db
 .env.*
 !.env.example
 tiago_ia.db
-lib/
 *.apk
 *.aab
 *.symbols
@@ -66,3 +65,8 @@ lib/
 pubspec.yaml
 pubspec.lock
 run_app.bat
+
+# === OBS ===
+# NÃO adicione a regra `lib/` aqui. Ela iria ignorar a source code
+# inteira do Flutter (frontend_flutter/lib/) e dos módulos Python/TS.
+# Pastas `lib/` em subdiretórios são commitadas normalmente.
