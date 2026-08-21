@@ -1837,8 +1837,8 @@ class ApiService {
     return <String, dynamic>{
       'updated_at': updatedAt,
       'updatedAt': updatedAt,
-      'polling_next_ms': 20000,
-      'pollingNextMs': 20000,
+      'polling_next_ms': 4000,
+      'pollingNextMs': 4000,
       'total': allGames.length,
       'matches': allGames,
     };

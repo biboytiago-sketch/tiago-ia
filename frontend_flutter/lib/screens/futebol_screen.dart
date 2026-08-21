@@ -66,7 +66,7 @@ class _FutebolScreenState extends State<FutebolScreen>
       _carregarAba(_abaAtual);
     });
     _carregarAba(0);
-    _timerPoll = Timer.periodic(const Duration(seconds: 20), (_) {
+    _timerPoll = Timer.periodic(const Duration(seconds: 8), (_) {
       if (_abaAtual == 0 && mounted) _carregarAba(0, silent: true);
     });
   }

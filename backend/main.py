@@ -2,8 +2,33 @@ import os
 import json
 import threading
 import time
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone as _tzmod
 from typing import List, Optional, Dict, Any
+
+# ============================================================
+# 🔒 FUSO HORÁRIO BRASÍLIA (UTC-3) — NUNCA MAIS DATA ERRADA
+# ============================================================
+# Render/AWS/Docker rodam em UTC. datetime.now() lá = 3h NA FRENTE do BR.
+# Sempre que calcular "hoje", usar _agora_brasil() ou _data_brasil_aware().
+_BRASIL_UTC_OFFSET_MAIN = timedelta(hours=-3)
+_BRASIL_TZ_MAIN = _tzmod(_BRASIL_UTC_OFFSET_MAIN)
+
+
+def _agora_brasil_main() -> datetime:
+    return datetime.now(_BRASIL_TZ_MAIN)
+
+
+def _data_brasil_aware_main(data_ref: Optional[datetime] = None) -> datetime:
+    if data_ref is None:
+        return _agora_brasil_main()
+    if data_ref.tzinfo is None:
+        return data_ref.replace(tzinfo=_BRASIL_TZ_MAIN)
+    return data_ref.astimezone(_BRASIL_TZ_MAIN)
+
+
+def _fmt_data_iso_main(d: datetime) -> str:
+    d_br = _data_brasil_aware_main(d)
+    return f"{d_br.year}-{str(d_br.month).zfill(2)}-{str(d_br.day).zfill(2)}"
 
 def _carregar_dotenv_manual(caminho_abs: str, override: bool = False):
     if not os.path.exists(caminho_abs):
@@ -680,7 +705,8 @@ def _v3_para_v1_jogo(jogo_v3: Dict[str, Any], idx: int = 0,
                       data_alvo: Optional[date] = None) -> Dict[str, Any]:
     """Converte 1 jogo V3 → 1 jogo formato V1 legado (24 campos exatos)."""
     from datetime import datetime as _dt
-    hoje = date.today()
+    # 🔒 FUSO CORRETO BR: date.today() = UTC em Render, usamos _agora_brasil_main().date()
+    hoje = _agora_brasil_main().date()
     da = data_alvo or hoje
     horaio = [(16,0),(16,30),(17,0),(17,30),(18,0),(18,30),(19,0),(19,30),
               (20,0),(20,30),(20,45),(21,0),(21,30),(22,0),(22,30)]
@@ -897,16 +923,65 @@ def _aplicar_flat_fields_flutter(jogos: List[Dict[str, Any]]) -> List[Dict[str, 
     return out
 
 
+# ═══════════════════════════════════════════════════════════════════
+# 🔒 FILTRO FINAL ANTI-MOCK (0% tolerância) — última linha de defesa
+# ═══════════════════════════════════════════════════════════════════
+# Remove QUALQUER jogo com "origem_dados" que contenha indicadores de
+# seed/mock/fallback. Exige rigidez: dados REAIS ou NADA.
+_MOCK_TOKENS_BANIDOS = (
+    "FALLBACK", "SEED", "OFFLINE", "DINAMICO", "DINÂMICO",
+    "ALEATORIO", "ALEATÓRIO", "MOCK", "SIMULADO", "HIBRIDO", "HÍBRIDO",
+)
+
+
+def _purge_mock_jogos(jogos: List[Dict[str, Any]],
+                      contexto: str = "global") -> List[Dict[str, Any]]:
+    """
+    Remove jogos com origem suspeita (mock/seed/fallback).
+    Retorna APENAS jogos cuja origem_dados NÃO contenha tokens banidos
+    OU que sejam RAPIDAPI_REAL / fontes pagas reconhecidas.
+    """
+    if not jogos:
+        return []
+
+    def _eh_real(j: Dict[str, Any]) -> bool:
+        origem = str(j.get("origem_dados") or "").strip().upper()
+        if not origem:
+            # Sem origem explicita: considera suspeito e remove (estrito)
+            return False
+        if origem == "RAPIDAPI_REAL":
+            return True
+        for tk in _MOCK_TOKENS_BANIDOS:
+            if tk.upper() in origem:
+                return False
+        return True
+
+    filtrados: List[Dict[str, Any]] = []
+    removidos = 0
+    for j in jogos:
+        if isinstance(j, dict) and _eh_real(j):
+            filtrados.append(j)
+        else:
+            removidos += 1
+    if removidos > 0:
+        print(f"[purge_mock] {contexto}: REMOVIDOS {removidos} jogos mock/suspeitos - mantidos {len(filtrados)} reais")
+    return filtrados
+
+
 def _v1_hoje_dinamico():
     """Retorna {'total','data','jogos','categorias'} V1 usando dados V3 dinâmicos."""
     v3_payload = nb_v3_sports_hoje()
     v3_jogos = list(v3_payload.get("jogos") or [])
+    # 🔒 PURGE MOCK: remove quaisquer jogos mock antes de converter para V1
+    v3_jogos = _purge_mock_jogos(v3_jogos, contexto="v1_hoje_dinamico_antes_v3_para_v1")
     v1_jogos = [_v3_para_v1_jogo(j, idx=i) for i, j in enumerate(v3_jogos)]
     # ⚠️ CAMADA DE SEGURANCA 100%: mesmo se _v3_para_v1_jogo() for versao antiga,
     # o helper abaixo SEMPRE injeta os 4 campos flat OBRIGATORIOS que o Flutter le:
     # home, away, liga, hr + aliases (home_name, mandante, campeonato etc).
     # Isso EVITA POR COMPLETO cair no fallback de jogos antigos.
     v1_jogos = _aplicar_flat_fields_flutter(v1_jogos)
+    # 🔒 2º PURGE (depois de flat fields): garante que nenhum mock passou
+    v1_jogos = _purge_mock_jogos(v1_jogos, contexto="v1_hoje_dinamico_depois_flat")
     cats = _monta_categorias_v1(v1_jogos)
     # ⚠️ CAMADA EXTRA: garante que "categorias" tb tem jogos com campos flat
     for c_key in cats.keys():
@@ -927,7 +1002,8 @@ def _v1_multiday_dinamico(dias: int = 4) -> Dict[str, Any]:
     datas: List[Dict[str, Any]] = []
     jogos_por_data: Dict[str, List[Dict[str, Any]]] = {}
     total_jogos = 0
-    hoje_iso = date.today()
+    # 🔒 FUSO CORRETO BR: date.today() → _agora_brasil_main().date()
+    hoje_iso = _agora_brasil_main().date()
     semana_full = ["Segunda","Terça","Quarta","Quinta","Sexta","Sábado","Domingo"]
 
     for d in range(dias):
@@ -1302,15 +1378,17 @@ def matches_list(
     Cache 15s para status=live, 60s demais.
     """
     try:
-        dados = get_matches_filtered(status=status, date=date, sport=sport)
+        # 🔒 FUSO CORRETO BR: se data não vier, calcular "hoje" no BR (não UTC do Render)
+        data_usada = date if date else _fmt_data_iso_main(_agora_brasil_main())
+        dados = get_matches_filtered(status=status, date=data_usada, sport=sport)
         return {
             "query": {
                 "status": status,
-                "date": date or datetime.now().strftime("%Y-%m-%d"),
+                "date": data_usada,
                 "sport": sport,
             },
             "total": len(dados),
-            "generated_at": datetime.now().isoformat(),
+            "generated_at": _agora_brasil_main().isoformat(),
             "cache_ttl_seconds": 15 if (status or "").lower() == "live" else 60,
             "matches": dados,
         }
@@ -2465,11 +2543,13 @@ def nb_v3_validar_multipla(req: _NbV3ValidadorMultiplaRequest):
 @app.get("/api/v3/sports/jogos-ranqueados-hoje", tags=["sports-v3"])
 def nb_v3_jogos_ranqueados():
     """🏆 TODOS os jogos do dia + LIVE ranqueados pela IA, com a MELHOR seleção por jogo já apontada."""
-    jogos = _lsv_jogos_ranqueados_hoje()
-    # Origem vem do próprio jogo via "origem_dados"
+    jogos_raw = _lsv_jogos_ranqueados_hoje()
+    # 🔒 PURGE MOCK FINAL: remove tudo que não for dado REAL (0% tolerância)
+    jogos = _purge_mock_jogos(list(jogos_raw), contexto="v3_jogos_ranqueados_hoje")
+    # Origem vem do próprio jogo via "origem_dados" (após purge)
     origem_geral = (
         "RAPIDAPI_REAL" if any(j.get("origem_dados") == "RAPIDAPI_REAL" for j in jogos)
-        else "FALLBACK_TODOS" if jogos else "FALLBACK_VAZIO"
+        else "FALLBACK_VAZIO"
     )
     return {
         "assinatura": "IA do Tiago · Live Sports v3 · Gerador IA",
@@ -2493,11 +2573,24 @@ def nb_v3_gerar_bilhetes_ia(
         jogos_minimo_por_bilhete=jogos_minimo,
         jogos_maximo_por_bilhete=jogos_maximo,
     )
+    # 🔒 CAMADA DE SEGURANCA 0 (ANTES DE TUDO): PURGE MOCK em todas as selecoes de todos os bilhetes
+    bilhetes_limpos = []
+    for idx_b, bilhete in enumerate(dados.get("bilhetes_sugeridos") or []):
+        if isinstance(bilhete.get("selecoes"), list):
+            sel_limpas = _purge_mock_jogos(
+                list(bilhete["selecoes"]),
+                contexto=f"v3_gerar_bilhetes_bilhete_{idx_b}"
+            )
+            # Só mantém o bilhete se ainda tiver pelo menos 1 seleção real
+            if sel_limpas:
+                bilhete["selecoes"] = sel_limpas
+                bilhetes_limpos.append(bilhete)
+    dados["bilhetes_sugeridos"] = bilhetes_limpos
     # 🔒 CAMADA DE SEGURANCA 1: Aplicar flat fields (home/away/liga/hr + aliases) EM CADA selecao de CADA bilhete
     for bilhete in (dados.get("bilhetes_sugeridos") or []):
         if isinstance(bilhete.get("selecoes"), list):
             bilhete["selecoes"] = _aplicar_flat_fields_flutter(list(bilhete["selecoes"]))
-    # Origem = olhar primeira seleção do primeiro bilhete
+    # Origem = olhar primeira seleção do primeiro bilhete (após purge)
     primeira_origem = "FALLBACK_VAZIO"
     primeiro_bilhete = (dados.get("bilhetes_sugeridos") or [{}])[0] if (dados.get("bilhetes_sugeridos") or []) else {}
     for s in (primeiro_bilhete.get("selecoes") or []):
@@ -2507,7 +2600,7 @@ def nb_v3_gerar_bilhetes_ia(
         primeira_origem = s.get("origem_dados") or primeira_origem
     # 🔒 CAMADA DE SEGURANCA 2: Qualquer fonte ONLINE (nao eh fallback vazio/todos) -> mapeia para RAPIDAPI_REAL
     #    (o Flutter GERAR_BILHETE_IA_SCREEN so reconhece 'RAPIDAPI_REAL' como online; qualquer outra string = Modo Offline)
-    FONTES_FALLBACK_OFFLINE = ("FALLBACK_VAZIO", "FALLBACK_TODOS", "IA_DO_TIAGO_DINAMICO", "SEED_ALEATORIO", "OFFLINE_SEED")
+    FONTES_FALLBACK_OFFLINE = ("FALLBACK_VAZIO", "FALLBACK_TODOS", "IA_DO_TIAGO_DINAMICO", "SEED_ALEATORIO", "OFFLINE_SEED", "FALLBACK_HIBRIDO_SEED")
     if primeira_origem not in FONTES_FALLBACK_OFFLINE:
         dados["origem_dados_geral"] = "RAPIDAPI_REAL"
     else:

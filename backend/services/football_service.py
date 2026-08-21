@@ -18,6 +18,23 @@ import random
 from datetime import datetime, timedelta, timezone, date
 from typing import Any, Dict, List, Optional
 
+# ============================================================
+# 🔒 FUSO HORÁRIO BRASÍLIA (UTC-3) — NUNCA MAIS DATA ERRADA
+# ============================================================
+_FS_BR_TZ = timezone(timedelta(hours=-3))
+
+
+def _fs_agora_br() -> datetime:
+    return datetime.now(_FS_BR_TZ)
+
+
+def _fs_data_aware(data_ref: Optional[datetime] = None) -> datetime:
+    if data_ref is None:
+        return _fs_agora_br()
+    if data_ref.tzinfo is None:
+        return data_ref.replace(tzinfo=_FS_BR_TZ)
+    return data_ref.astimezone(_FS_BR_TZ)
+
 # ====== Carrega variáveis do .env ======
 try:
     from dotenv import load_dotenv
@@ -39,21 +56,18 @@ except Exception:
 #                          CAMADA DE CACHE EM MEMÓRIA
 # =============================================================================
 _CACHE: Dict[str, Dict[str, Any]] = {}
-_CACHE_TTL = 60  # segundos (padrão)
+# ⚠️ 21/08 V3.7: padrão de 60s → 25s (odds mudam rápido)
+_CACHE_TTL = 25  # segundos (padrão)
 
 
 def _cache_get(chave: str) -> Optional[Any]:
-    item = _CACHE.get(chave)
-    if not item:
-        return None
-    if (datetime.now().timestamp() - item["ts"]) > _CACHE_TTL:
-        _CACHE.pop(chave, None)
-        return None
-    return item["dado"]
+    """⚠️ Mantida para compatibilidade com código legado — agora usa TTL absoluto."""
+    return _cache_get_ttl(chave)
 
 
-def _cache_set(chave: str, dado: Any) -> None:
-    _CACHE[chave] = {"ts": datetime.now().timestamp(), "dado": dado}
+def _cache_set(chave: str, dado: Any, ttl: Optional[int] = None) -> None:
+    """⚠️ Mantida para compatibilidade — agora grava SEMPRE com TTL explícito."""
+    _cache_set_ttl(chave, dado, int(ttl) if ttl is not None else _CACHE_TTL)
 
 
 # =============================================================================
@@ -741,7 +755,9 @@ def verify_selected_matches(match_ids):
 #
 
 _LIVE_CACHE_KEY = "live_flashscore_all"
-_LIVE_CACHE_TTL = 10  # segundos (cache rápido para jogos ao vivo, preserva cota RapidAPI)
+# ⚠️ 21/08 V3.7: 10s → 4s. Jogos ao vivo precisam de gols e placar atualizados
+# em tempo real (usuário reclamou de atraso). 4s = polling rápido sem exceder cotas.
+_LIVE_CACHE_TTL = 4
 
 
 def _cache_set_ttl(chave: str, dado: Any, ttl: int) -> None:
@@ -1317,7 +1333,7 @@ def _match_flat_para_flashscore(m: Dict[str, Any]) -> Dict[str, Any]:
             "status_short": status_flat["status_short"],
             "elapsed": int(status_flat["elapsed"] or 0),
             "status_long": status_flat["status_long"],
-            "date": m.get("data_jogo_iso") or m.get("date") or datetime.now().strftime("%Y-%m-%d"),
+            "date": m.get("data_jogo_iso") or m.get("date") or _fs_agora_br().strftime("%Y-%m-%d"),
             "time": m.get("horario") or "00:00",
         },
         "teams": {
@@ -1349,12 +1365,14 @@ def get_matches_filtered(status: str = "all",
     """
     sport = (sport or "football").lower()
     status_l = (status or "all").lower()
-    data_ref = datetime.now()
+    # 🔒 FUSO BR: usa _fs_agora_br() para default data_ref (não UTC)
+    data_ref = _fs_agora_br()
     offset_dia = 0
     if date:
         try:
             data_ref = datetime.strptime(date, "%Y-%m-%d")
-            delta = (data_ref.date() - datetime.now().date()).days
+            data_ref = _fs_data_aware(data_ref)
+            delta = (data_ref.date() - _fs_agora_br().date()).days
             offset_dia = max(0, delta)
         except Exception:
             pass
@@ -1444,7 +1462,7 @@ def calcular_sinais_ia(usar_gemini: bool = False,
       • Ao vivo com placar 0×0 / 1×0 até 60' + pressão positiva → APOSTAR under/ambos?
     """
     from datetime import datetime as _dt
-    hoje_iso = date.today().isoformat()
+    hoje_iso = _fs_agora_br().date().isoformat()
 
     # ========== PURGE AUTOMÁTICO SE DATA MUDOU ==========
     # VERSÃO DO CACHE INCREMENTADA v39: força invalidação GLOBAL de qualquer cache
@@ -1732,7 +1750,7 @@ def _map_v3_flat_to_v1_fixture_shape(v3_jogos_flat: List[Dict[str, Any]]) -> Lis
     espera (igual ao retorno de get_matches_filtered / API-Football oficial).
     """
     out: List[Dict[str, Any]] = []
-    data_hoje = date.today().isoformat()
+    data_hoje = _fs_agora_br().date().isoformat()
     for idx, j in enumerate(v3_jogos_flat or []):
         if not isinstance(j, dict):
             continue
@@ -1803,7 +1821,7 @@ def _fs_mock_all_games_for_signals() -> List[Dict[str, Any]]:
     if not allow_mock:
         return []
     lista: List[Dict[str, Any]] = []
-    data = datetime.now().strftime("%Y-%m-%d")
+    data = _fs_agora_br().strftime("%Y-%m-%d")
     confrontos = [
         ("Palmeiras", "Fluminense", "Brasileirão Série A", "Brazil", "🇧🇷", 71, "NS", 0, None, None, 1.45, 4.20, 6.50),
         ("Flamengo", "Vasco", "Brasileirão Série A", "Brazil", "🇧🇷", 71, "1H", 32, 1, 0, 1.58, 4.00, 5.20),

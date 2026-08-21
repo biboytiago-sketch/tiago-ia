@@ -136,7 +136,7 @@ class _FlashScoreHomeScreenState extends State<FlashScoreHomeScreen> {
   Timer? _pollingSinais;
 
   void _iniciarPollingGlobal() {
-    _pollingSinais = Timer.periodic(const Duration(seconds: 45), (_) {
+    _pollingSinais = Timer.periodic(const Duration(seconds: 12), (_) {
       if (mounted) {
         _buscarSinais(usarGemini: false);
         if (_filtro != _FiltroStatus.finished) {
@@ -494,23 +494,23 @@ class _FlashScoreHomeScreenState extends State<FlashScoreHomeScreen> {
     _buscarSinais(usarGemini: false);
     switch (f) {
       case _FiltroStatus.live:
-        _pollingLive = Timer.periodic(const Duration(seconds: 15), (_) {
+        _pollingLive = Timer.periodic(const Duration(seconds: 5), (_) {
           if (mounted) _buscarPartidas(silent: true);
         });
         break;
       case _FiltroStatus.todos:
       case _FiltroStatus.odds:
-        _pollingLive = Timer.periodic(const Duration(seconds: 45), (_) {
+        _pollingLive = Timer.periodic(const Duration(seconds: 20), (_) {
           if (mounted) _buscarPartidas(silent: true);
         });
         break;
       case _FiltroStatus.upcoming:
-        _pollingLive = Timer.periodic(const Duration(seconds: 60), (_) {
+        _pollingLive = Timer.periodic(const Duration(seconds: 30), (_) {
           if (mounted) _buscarPartidas(silent: true);
         });
         break;
       case _FiltroStatus.finished:
-        _pollingLive = Timer.periodic(const Duration(seconds: 120), (_) {
+        _pollingLive = Timer.periodic(const Duration(seconds: 90), (_) {
           if (mounted) _buscarPartidas(silent: true);
         });
         break;

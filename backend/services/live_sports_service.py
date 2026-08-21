@@ -8,6 +8,41 @@ from typing import List, Dict, Any, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
+# ============================================================
+# 🔒 FUSO HORÁRIO BRASÍLIA (UTC-3) — NUNCA MAIS DATA ERRADA
+# ============================================================
+# Render/AWS/Docker rodam em UTC. datetime.now() lá = 3h NA FRENTE do BR.
+# Sempre que calcular "hoje", usar _agora_brasil() ou _data_brasil_aware().
+_BRASIL_UTC_OFFSET = timedelta(hours=-3)
+_BRASIL_TZ = _tzmod(_BRASIL_UTC_OFFSET)
+
+
+def _agora_brasil() -> datetime:
+    """Datetime AGORA no fuso de Brasília (UTC-3). Seguro para Render/UTC."""
+    return datetime.now(_BRASIL_TZ)
+
+
+def _data_brasil_aware(data_ref: Optional[datetime] = None) -> datetime:
+    """Garante que data_ref tem tzinfo=Brasília. Se for naive, assume Brasilia."""
+    if data_ref is None:
+        return _agora_brasil()
+    if data_ref.tzinfo is None:
+        # Data naive (sem fuso): assumimos que quem mandou quis dizer BR (comum em chamadas locais)
+        return data_ref.replace(tzinfo=_BRASIL_TZ)
+    # Já tem timezone: converte para BR
+    return data_ref.astimezone(_BRASIL_TZ)
+
+
+def _season_correta_para_data(data_ref_br: datetime) -> int:
+    """
+    Ligações europeias = season = ANO_DO_INÍCIO (agosto 2026 => season=2026, não 2027).
+    Ligações brasileiras = season = ano civil (2026).
+    Para simplificar e compatibilizar com a maioria das APIs: usamos SEMPRE
+    o ANO CIVIL da data (ex: 21/08/2026 => season=2026).
+    """
+    return data_ref_br.year
+
+
 _SIGNATURE_IA_DO_TIAGO = "IA do Tiago · Live Sports v3 · Oficial"
 
 _RAPIDAPI_KEY = (
@@ -163,24 +198,37 @@ _HEADERS = {
 
 _BASE_URL = f"https://{_RAPIDAPI_HOST}"
 
+# ═══════════════════════════════════════════════════════════════════
+# 🔴 CORREÇÃO CRÍTICA: CACHE com expiração CORRETA (não deixa tudo 60s)
+# ═══════════════════════════════════════════════════════════════════
+# Bug original: _cache_get SEMPRE comparava com _CACHE_TTL_STATIC,
+# mesmo quando a chave foi gravada com TTL LIVE de 12s.
+#   → Resultado: tudo ficava mínimo 60s em cache = jogos atrasados.
+#
+# Solução V3.7: guardar (expira_em_unix_time, valor, ttl_usado) e
+# comparar com time.time() absoluto. LIVE = 5s (antes 12s → ainda lento).
 _CACHE: Dict[str, tuple[float, Any]] = {}
-_CACHE_TTL_LIVE = 12.0
-_CACHE_TTL_STATIC = 60.0
+# Cache LIVE: máximo 5 segundos (gols mudam rápido!)
+_CACHE_TTL_LIVE = 5.0
+# Cache do dia/estático: 30s (antes 60s) para atualizar odds sem ficar obsoleto
+_CACHE_TTL_STATIC = 30.0
 
 
 def _cache_get(chave: str) -> Optional[Any]:
     entrada = _CACHE.get(chave)
     if not entrada:
         return None
-    ts, valor = entrada
-    if time.time() - ts > _CACHE_TTL_STATIC:
+    expira_em, valor = entrada
+    if time.time() > expira_em:
         _CACHE.pop(chave, None)
         return None
     return valor
 
 
 def _cache_set(chave: str, valor: Any, ttl: float = _CACHE_TTL_STATIC) -> None:
-    _CACHE[chave] = (time.time() + ttl - _CACHE_TTL_STATIC, valor)
+    # Guarda o timestamp ABSOLUTO de expiração (time.time() + ttl)
+    # → NÃO depende de qual constante for usada na leitura.
+    _CACHE[chave] = (time.time() + max(1.0, float(ttl)), valor)
 
 
 def _get_json(path: str, params: Optional[Dict[str, Any]] = None, ttl: float = _CACHE_TTL_STATIC) -> Dict[str, Any]:
@@ -479,9 +527,11 @@ def _fonte_req_live(fonte: Dict[str, Any], camada: str) -> Optional[List[Dict[st
     # (não é exatamente "ao vivo" mas são dados 100% reais ao invés de seed).
     # ============================================================
     if camada == "DIRECT" and fid == "FOOTBALLDATA_ORG":
-        hoje = datetime.now(_tzmod.utc).date()
-        inicio = hoje - timedelta(days=1)
-        fim = hoje + timedelta(days=2)
+        # 🔒 FUSO BR: janela de ontem+hoje+amanhã SEMPRE usando horário Brasilia,
+        # não UTC do servidor (senão no Render virava o dia 3h antes do BR).
+        hoje_br = _agora_brasil().date()
+        inicio = hoje_br - timedelta(days=1)
+        fim = hoje_br + timedelta(days=2)
         path = fonte.get("date_path") or "/matches"
         params_extra = {
             "dateFrom": inicio.isoformat(),
@@ -501,28 +551,55 @@ def _fonte_req_live(fonte: Dict[str, Any], camada: str) -> Optional[List[Dict[st
     return None
 
 
-def _fonte_req_data(fonte: Dict[str, Any], camada: str, data_ref: datetime) -> Optional[List[Dict[str, Any]]]:
-    """Tenta date_path de 1 fonte (com fallback live_paths) e retorna lista NORMALIZADA (ou None)."""
-    data_iso = _fmt_data_iso(data_ref)
-    ano = data_ref.year
+def _fonte_req_data(fonte: Dict[str, Any], camada: str, data_ref: datetime,
+                    status: str = "NS-SCHEDULED-LIVE-IN_PLAY-1H-HT-2H") -> Optional[List[Dict[str, Any]]]:
+    """
+    Tenta date_path de 1 fonte (com fallback live_paths) e retorna lista NORMALIZADA (ou None).
+
+    ⚠️ CORREÇÃO DATA ERRADA 2026-08-21:
+      · Converte data_ref para timezone Brasilia (UTC-3) → evita pedir dia seguinte às 21h BR (que é UTC 00h).
+      · Repassa `status` para a API (NS, SCHEDULED, LIVE, etc) — NÃO retorna histórico antigo.
+      · Season corrigida via `_season_correta_para_data`.
+    """
+    # 🔒 GARANTIA DE FUSO: sempre converte para BR antes de formatar YYYY-MM-DD
+    data_br = _data_brasil_aware(data_ref)
+    data_iso = _fmt_data_iso(data_br)
+    ano = _season_correta_para_data(data_br)
     mapper = _fonte_get_mapper(fonte)
     origem = fonte["origem"]
     fid = fonte.get("id", "")
     path = fonte.get("date_path") or ""
     pname = fonte.get("date_param") or "date"
     params_extra: Dict[str, Any] = {}
+
+    # 🧭 STATUS: evita retornar jogos antigos / históricos.
+    # Multi-status separado por hífen (NS-SCHEDULED-LIVE) é suportado pela maioria dos endpoints.
+    if status:
+        # API-Football v3 usa parâmetro "status" exato
+        if camada == "DIRECT" and fid == "APIFOOTBALL_DIRECT":
+            params_extra["status"] = status
+        elif camada == "RAPIDAPI" and fid in ("API_FOOTBALL_V1_LEGACY", "FOOTBALL_PRO_V3"):
+            params_extra["status"] = status
+        elif camada == "RAPIDAPI":
+            # Para hosts genéricos RapidAPI: tentamos tanto status quanto state
+            params_extra["status"] = status
+            params_extra.setdefault("state", status)
+
     if camada == "DIRECT" and fid == "FOOTBALLDATA_ORG":
-        # fdorg: dateFrom & dateTo são ambos necessários
+        # fdorg: dateFrom & dateTo são ambos necessários. Status = SCHEDULED/LIVE/FINISHED.
         params_extra["dateFrom"] = data_iso
         params_extra["dateTo"] = data_iso
+        params_extra.setdefault("status", status.split("-")[0] if "-" in status else status)
     elif camada == "RAPIDAPI" and fid == "API_FOOTBALL_V1_LEGACY":
         params_extra[pname] = data_iso
         params_extra["season"] = ano
         params_extra["timezone"] = "America/Sao_Paulo"
+        # status já setado acima
     elif camada == "RAPIDAPI" and fid == "FOOTBALL_PRO_V3":
         params_extra[pname] = data_iso
         params_extra.setdefault("timezone", "America/Sao_Paulo")
         params_extra.setdefault("season", ano)
+        # status já setado acima
     elif camada == "RAPIDAPI":
         params_extra[pname] = data_iso
         params_extra.setdefault("sport_id", 1)
@@ -532,6 +609,7 @@ def _fonte_req_data(fonte: Dict[str, Any], camada: str, data_ref: datetime) -> O
         params_extra[pname] = data_iso
         params_extra["season"] = ano
         params_extra["timezone"] = "America/Sao_Paulo"
+        # status já setado acima
     else:
         params_extra[pname] = data_iso
 
@@ -862,16 +940,23 @@ def _try_sources_live() -> List[Dict[str, Any]]:
     return []
 
 
-def _try_sources_por_data(data_ref: datetime) -> List[Dict[str, Any]]:
-    """CADEIA UNIFICADA V3.4: tenta 6 fontes EM ORDEM para JOGOS DE UMA DATA."""
-    data_iso = _fmt_data_iso(data_ref)
+def _try_sources_por_data(data_ref: datetime,
+                          status: str = "NS-SCHEDULED-LIVE-IN_PLAY-1H-HT-2H") -> List[Dict[str, Any]]:
+    """CADEIA UNIFICADA V3.6: tenta 6 fontes EM ORDEM para JOGOS DE UMA DATA.
+
+    ⚠️ Correções 21/08/2026:
+      · Fuso BR: data_ref é normalizada para UTC-3 (evita data "amanhã" às 21h BR)
+      · Status: passado adiante p/ evitar histórico antigo — só NS + SCHEDULED + LIVE.
+    """
+    data_br = _data_brasil_aware(data_ref)
+    data_iso = _fmt_data_iso(data_br)
     cadeia = _cadeia_todas_fontes_ordenadas()
     for fonte, camada in cadeia:
         try:
-            norm = _fonte_req_data(fonte, camada, data_ref) or []
+            norm = _fonte_req_data(fonte, camada, data_br, status=status) or []
             if norm:
                 logger.info(
-                    f"FONTE {fonte.get('id')} ({camada}) ({data_iso}) → {len(norm)} partidas carregadas")
+                    f"FONTE {fonte.get('id')} ({camada}) ({data_iso} status={status[:24]}) → {len(norm)} partidas carregadas")
                 return norm
         except Exception as e:
             logger.warning(f"tentativa fonte {fonte.get('id')} data erro: {e}")
@@ -1318,27 +1403,46 @@ def _buscar_desfalques_resumo(casa: Optional[str], fora: Optional[str]) -> List[
     return out
 
 
-def obter_jogos_por_data(data_ref: datetime, status: str = "NS") -> List[Dict[str, Any]]:
-    """Função PÚBLICA V3.4 — jogos de uma data.
+def obter_jogos_por_data(data_ref: datetime, status: str = "NS-SCHEDULED-LIVE-IN_PLAY-1H-HT-2H") -> List[Dict[str, Any]]:
+    """Função PÚBLICA V3.6 — jogos de uma data.
+
+    ⚠️ 21/08/2026 CORREÇÕES CRÍTICAS:
+      · data_ref sempre convertida para BRASILIA (UTC-3) ANTES de ser YYYY-MM-DD
+      · Cache key agora INCLUI status (para não misturar NS com LIVE/historico)
+      · Parâmetro status PROPAGADO para cadeia de 6 fontes E método legado /fixtures
+      · Método legado tb recebe timezone=America/Sao_Paulo
 
     Ordem: 1) _try_sources_por_data (cadeia unificada 6 fontes)
            2) Método legado _get_json /fixtures
            3) _fallback_data
     """
-    cache_key = f"PUBLIC_DATE::{_fmt_data_iso(data_ref)}"
+    # 🔒 GARANTIA FUSO: converta data_ref PARA BR ANTES de qualquer cálculo
+    data_br = _data_brasil_aware(data_ref)
+    data_iso = _fmt_data_iso(data_br)
+    ano_br = _season_correta_para_data(data_br)
+
+    # Cache key INCLUI status: evita devolver histório quando user pediu NS
+    cache_key = f"PUBLIC_DATE::{data_iso}::S={status[:32]}"
     cached = _cache_get(cache_key)
     if cached and isinstance(cached, list):
         return cached
 
-    # 1) Cadeia unificada
-    lista = _try_sources_por_data(data_ref)
+    # 1) Cadeia unificada (6 fontes reais) — com status PROPAGADO
+    lista = _try_sources_por_data(data_br, status=status)
     if lista:
         saida = [_compat({**j, "assinatura": _SIGNATURE_IA_DO_TIAGO}) for j in lista]
         _cache_set(cache_key, saida, _CACHE_TTL_STATIC)
         return saida
 
-    # 2) Método legado
-    params = {"date": _fmt_data_iso(data_ref), "season": data_ref.year, "timezone": "America/Sao_Paulo"}
+    # 2) Método legado /fixtures — tb recebe status + timezone BR + season BR
+    params = {
+        "date": data_iso,
+        "season": ano_br,
+        "timezone": "America/Sao_Paulo",
+    }
+    # Multi-status: API-Football v3 aceita separado por hífen (NS-LIVE-etc)
+    if status:
+        params["status"] = status
     resposta = _get_json("/fixtures", params=params, ttl=_CACHE_TTL_STATIC).get("response") or []
     if resposta:
         saida: List[Dict[str, Any]] = []
@@ -1376,7 +1480,7 @@ def obter_jogos_por_data(data_ref: datetime, status: str = "NS") -> List[Dict[st
                 "status_flag": "EM_ANDAMENTO" if st == "EM_ANDAMENTO" else "FUTURO",
                 "tempo_decorrido": minuto if em_andamento else None,
                 "status_curto": status_short,
-                "data": _fmt_data_iso(data_ref),
+                "data": data_iso,
                 "horario_br": horario_br,
                 "liga": lg.get("name"),
                 "liga_pais": (lg.get("country") or ""),
@@ -1402,54 +1506,34 @@ def obter_jogos_por_data(data_ref: datetime, status: str = "NS") -> List[Dict[st
             _cache_set(cache_key, saida, _CACHE_TTL_STATIC)
             return saida
 
-    # 3) Fallback IA — MODO HÍBRIDO (desde 2026-08-21 V3.5):
-    #    - STRICT MODE: se ALLOW_SINAIS_FALLBACK_MOCK=1 → substitui tudo por seed (legado)
-    #    - MODO HÍBRIDO (DEFAULT): se API retornou MENOS QUE 25 JOGOS REAIS,
-    #      ACRESCENTA jogos seed dinâmico para chegar em 25-40 jogos de ligas
-    #      famosas (Brasileirão, Champions, Betano Portugal, etc). Dessa forma
-    #      o gerador de bilhetes SEMPRE tem pool grande e diversificado,
-    #      sem perder os jogos reais retornados pelas fontes pagas.
-    #    - Marcamos origem seed como "FALLBACK_HIBRIDO" para distinguir.
+    # 3) Fallback IA — STRICT MODE 0% MOCK (desde 2026-08-21 V3.6):
+    #    - Se ALLOW_SINAIS_FALLBACK_MOCK=1 → substitui tudo por seed (legado, APENAS dev)
+    #    - Se ALLOW_SINAIS_FALLBACK_MOCK=0 (DEFAULT / PRODUÇÃO):
+    #      NÃO injeta NENHUM seed/mock, mesmo que haja ZERO jogos reais.
+    #      O usuário EXIGE 0% de dados falsos. Se as fontes reais falharem,
+    #      retorna lista VAZIA e a UI mostra "Sem dados no momento".
     import os as _os_fb
     _allow = (_os_fb.getenv("ALLOW_SINAIS_FALLBACK_MOCK", "0").strip().lower()
               in ("1", "true", "sim", "yes", "s"))
-    MIN_JOGOS_DESEJADOS = 30
     if _allow:
         fb = [_compat({**j, "assinatura": _SIGNATURE_IA_DO_TIAGO})
-              for j in _fallback_data(data_ref)]
+              for j in _fallback_data(data_br)]
         _cache_set(cache_key, fb, _CACHE_TTL_STATIC)
+        logger.warning(f"_try_sources: MOCK MODE ATIVO (ALLOW_SINAIS_FALLBACK_MOCK=1) → {len(fb)} seeds")
         return fb
-    if len(saida) < MIN_JOGOS_DESEJADOS:
-        ids_existentes = {(j.get("fixture_id"), j.get("time_casa"), j.get("time_fora")) for j in saida}
-        fb_raw = _fallback_data(data_ref)
-        fb_limitado = []
-        for j in fb_raw:
-            if len(saida) + len(fb_limitado) >= MIN_JOGOS_DESEJADOS + 15:
-                break
-            chave = (j.get("fixture_id"), j.get("time_casa"), j.get("time_fora"))
-            if chave in ids_existentes:
-                continue
-            ids_existentes.add(chave)
-            j_compat = _compat({
-                **j,
-                "origem_dados": "FALLBACK_HIBRIDO_SEED",
-                "assinatura": _SIGNATURE_IA_DO_TIAGO,
-            })
-            fb_limitado.append(j_compat)
-        if fb_limitado:
-            saida = list(saida) + fb_limitado
-            _cache_set(cache_key, saida, _CACHE_TTL_STATIC // 2)
-            logger.info(f"_try_sources retornou {len(saida) - len(fb_limitado)} reais + {len(fb_limitado)} seed hibrido = total {len(saida)} jogos")
-            return saida
-    if not saida:
-        _cache_set(cache_key, [], _CACHE_TTL_STATIC // 2)
-        return []
-    return saida
+    _cache_set(cache_key, [], _CACHE_TTL_STATIC // 2)
+    return []
 
 
 def obter_jogos_hoje() -> List[Dict[str, Any]]:
+    """Jogos de HOJE (Brasília UTC-3) — LIVE + futuros.
+
+    🔒 Nunca mais usa datetime.now() cru (que em Render/UTC já é dia seguinte
+    às 21h BR). Usa _agora_brasil().
+    """
     live = obter_jogos_ao_vivo()
-    hoje = obter_jogos_por_data(datetime.now())
+    hoje_ref = _agora_brasil()
+    hoje = obter_jogos_por_data(hoje_ref)
     ids = set()
     dedup: List[Dict[str, Any]] = []
     for j in live + hoje:
@@ -1463,11 +1547,14 @@ def obter_jogos_hoje() -> List[Dict[str, Any]]:
 
 
 def obter_jogos_amanha() -> List[Dict[str, Any]]:
-    return obter_jogos_por_data(datetime.now() + timedelta(days=1))
+    """Jogos de amanhã (fuso de Brasília)."""
+    amanha_ref = _agora_brasil() + timedelta(days=1)
+    return obter_jogos_por_data(amanha_ref)
 
 
 def obter_jogos_fim_semana() -> List[Dict[str, Any]]:
-    hoje = datetime.now()
+    """Jogos do próximo fim de semana (contando a partir de hoje BR)."""
+    hoje = _agora_brasil()
     start = hoje + timedelta(days=(5 - hoje.weekday()) % 7)
     if start.date() < hoje.date():
         start = hoje
